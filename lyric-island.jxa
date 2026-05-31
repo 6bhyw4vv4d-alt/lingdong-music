@@ -1,0 +1,1159 @@
+#!/usr/bin/osascript -l JavaScript
+
+ObjC.import("Cocoa");
+ObjC.import("Foundation");
+ObjC.import("AppKit");
+
+var app = Application.currentApplication();
+app.includeStandardAdditions = true;
+
+var PRODUCT_NAME = "音悦台";
+var LRCLIB_BASE_URL = "https://lrclib.net/api";
+var USER_AGENT = "Yinyuetai-Lyric-Island/0.1 (personal macOS JXA prototype)";
+var PROJECT_ROOT = ObjC.unwrap($.NSFileManager.defaultManager.currentDirectoryPath);
+var OVERRIDES_PATH = PROJECT_ROOT + "/data/overrides.json";
+
+var state = {
+  window: null,
+  titleLabel: null,
+  lyricLabel: null,
+  statusButton: null,
+  controller: null,
+  correctionPanel: null,
+  fields: {},
+  candidatePopup: null,
+  manualCandidates: [],
+  currentMeta: null,
+  currentKey: "",
+  currentLyrics: [],
+  currentLyricsSource: "",
+  lastDisplayLine: "",
+  lastLookupKey: "",
+  lastError: "",
+  overrides: null
+};
+
+function run(argv) {
+  argv = argv || [];
+  if (argv.indexOf("--self-test") >= 0) {
+    runSelfTest();
+    return;
+  }
+  if (argv.indexOf("--ui-smoke") >= 0) {
+    runUiSmokeTest();
+    return;
+  }
+  if (argv.indexOf("--lrclib-smoke") >= 0) {
+    runLrclibSmokeTest();
+    return;
+  }
+  if (argv.indexOf("--music-smoke") >= 0) {
+    runMusicSmokeTest();
+    return;
+  }
+
+  ensureDataFiles();
+  state.overrides = loadOverrides();
+  startApp();
+}
+
+function ensureDataFiles() {
+  var fm = $.NSFileManager.defaultManager;
+  fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
+    $(PROJECT_ROOT + "/data"),
+    true,
+    $.NSDictionary.dictionary,
+    null
+  );
+  if (!fm.fileExistsAtPath($(OVERRIDES_PATH))) {
+    writeTextFile(OVERRIDES_PATH, JSON.stringify({ version: 1, tracks: {} }, null, 2) + "\n");
+  }
+}
+
+function loadOverrides() {
+  try {
+    var text = readTextFile(OVERRIDES_PATH);
+    var parsed = JSON.parse(text);
+    if (!parsed || parsed.version !== 1 || !parsed.tracks) {
+      return { version: 1, tracks: {} };
+    }
+    return parsed;
+  } catch (error) {
+    return { version: 1, tracks: {} };
+  }
+}
+
+function saveOverrides() {
+  ensureDataFiles();
+  writeTextFile(OVERRIDES_PATH, JSON.stringify(state.overrides, null, 2) + "\n");
+}
+
+function readTextFile(path) {
+  var text = $.NSString.stringWithContentsOfFileEncodingError(
+    $(path),
+    $.NSUTF8StringEncoding,
+    null
+  );
+  if (!text) {
+    return "";
+  }
+  return ObjC.unwrap(text);
+}
+
+function writeTextFile(path, text) {
+  var nsText = $.NSString.alloc.initWithUTF8String(text);
+  nsText.writeToFileAtomicallyEncodingError($(path), true, $.NSUTF8StringEncoding, null);
+}
+
+function startApp() {
+  var nsApp = $.NSApplication.sharedApplication;
+  nsApp.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+
+  registerControllerClass();
+  state.controller = $.LyricIslandController.alloc.init;
+
+  createIslandWindow();
+  renderStatus("等待 Music.app", "打开 Music.app 播放歌曲后会自动匹配歌词");
+
+  $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(
+    1.0,
+    state.controller,
+    "tick:",
+    null,
+    true
+  );
+
+  nsApp.run;
+}
+
+function registerControllerClass() {
+  ObjC.registerSubclass({
+    name: "LyricIslandController",
+    methods: {
+      "tick:": {
+        types: ["void", ["id"]],
+        implementation: function(_timer) {
+          pollAndRender();
+        }
+      },
+      "openCorrection:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          openCorrectionPanel();
+        }
+      },
+      "searchCandidates:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          searchManualCandidates();
+        }
+      },
+      "saveCorrection:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          saveCorrection();
+        }
+      },
+      "cancelCorrection:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          closeCorrectionPanel();
+        }
+      }
+    }
+  });
+}
+
+function createIslandWindow() {
+  var width = 620;
+  var height = 86;
+  var screenFrame = getVisibleScreenFrame();
+  var x = screenFrame.origin.x + (screenFrame.size.width - width) / 2;
+  var y = screenFrame.origin.y + screenFrame.size.height - height - 16;
+  var frame = $.NSMakeRect(x, y, width, height);
+
+  var window = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
+    frame,
+    $.NSWindowStyleMaskBorderless,
+    $.NSBackingStoreBuffered,
+    false
+  );
+  window.setOpaque(false);
+  window.setBackgroundColor($.NSColor.clearColor);
+  window.setLevel($.NSFloatingWindowLevel);
+  window.setMovableByWindowBackground(true);
+  window.setHasShadow(true);
+  window.setCollectionBehavior($.NSWindowCollectionBehaviorCanJoinAllSpaces);
+
+  var content = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, width, height));
+  content.setWantsLayer(true);
+  content.layer.setBackgroundColor(
+    $.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.04, 0.045, 0.05, 0.88).CGColor
+  );
+  content.layer.setCornerRadius(34);
+  content.layer.setMasksToBounds(false);
+
+  var titleLabel = makeLabel($.NSMakeRect(72, 50, 476, 22), 13, 0.82, true);
+  var lyricLabel = makeLabel($.NSMakeRect(72, 18, 476, 30), 20, 1.0, true);
+  var fixButton = $.NSButton.buttonWithTitleTargetAction($("修正"), state.controller, "openCorrection:");
+  fixButton.setFrame($.NSMakeRect(548, 28, 56, 28));
+  fixButton.setBezelStyle($.NSBezelStyleRounded);
+  fixButton.setFont($.NSFont.systemFontOfSize(12));
+
+  var dot = $.NSView.alloc.initWithFrame($.NSMakeRect(26, 34, 18, 18));
+  dot.setWantsLayer(true);
+  dot.layer.setCornerRadius(9);
+  dot.layer.setBackgroundColor(
+    $.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.12, 0.72, 0.5, 1).CGColor
+  );
+
+  content.addSubview(dot);
+  content.addSubview(titleLabel);
+  content.addSubview(lyricLabel);
+  content.addSubview(fixButton);
+  window.setContentView(content);
+  window.makeKeyAndOrderFront(null);
+
+  state.window = window;
+  state.titleLabel = titleLabel;
+  state.lyricLabel = lyricLabel;
+  state.statusButton = fixButton;
+}
+
+function getVisibleScreenFrame() {
+  var fallback = {
+    origin: { x: 0, y: 0 },
+    size: { width: 1440, height: 900 }
+  };
+
+  try {
+    var screen = $.NSScreen.mainScreen;
+    if (!screen) {
+      return fallback;
+    }
+    var frame = screen.visibleFrame;
+    if (!frame || !frame.origin || !frame.size) {
+      return fallback;
+    }
+    return frame;
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+function makeLabel(frame, size, alpha, center) {
+  var label = $.NSTextField.alloc.initWithFrame(frame);
+  label.setEditable(false);
+  label.setSelectable(false);
+  label.setBordered(false);
+  label.setDrawsBackground(false);
+  label.setTextColor($.NSColor.colorWithCalibratedWhiteAlpha(1, alpha));
+  label.setFont($.NSFont.systemFontOfSizeWeight(size, $.NSFontWeightMedium));
+  label.setLineBreakMode($.NSLineBreakByTruncatingTail);
+  label.setMaximumNumberOfLines(1);
+  if (center) {
+    label.setAlignment($.NSTextAlignmentCenter);
+  }
+  return label;
+}
+
+function renderStatus(title, lyric) {
+  if (!state.titleLabel || !state.lyricLabel) {
+    return;
+  }
+  state.titleLabel.setStringValue($(title || PRODUCT_NAME));
+  state.lyricLabel.setStringValue($(lyric || ""));
+}
+
+function pollAndRender() {
+  var musicState = readMusicState();
+
+  if (musicState.kind === "waiting") {
+    resetCurrentTrack();
+    renderStatus("等待 Music.app", "打开 Music.app 播放歌曲");
+    return;
+  }
+
+  if (musicState.kind === "permission") {
+    resetCurrentTrack();
+    renderStatus("需要允许控制 Music.app", "系统设置 > 隐私与安全性 > 自动化");
+    return;
+  }
+
+  if (musicState.kind === "stopped") {
+    resetCurrentTrack();
+    renderStatus("暂无播放内容", "在 Music.app 中开始播放后会自动显示歌词");
+    return;
+  }
+
+  if (musicState.kind === "error") {
+    renderStatus(PRODUCT_NAME, "读取 Music.app 状态失败");
+    return;
+  }
+
+  var meta = musicState.meta;
+  var key = makeTrackKey(meta);
+  var title = formatTrackTitle(meta, musicState.playbackState);
+
+  if (key !== state.currentKey) {
+    state.currentKey = key;
+    state.currentMeta = meta;
+    state.currentLyrics = [];
+    state.currentLyricsSource = "";
+    state.lastDisplayLine = "";
+    renderStatus(title, "正在匹配歌词");
+    resolveLyricsForCurrentTrack(meta, key);
+  }
+
+  if (!state.currentLyrics || state.currentLyrics.length === 0) {
+    if (state.lastError) {
+      renderStatus(title, state.lastError);
+    } else {
+      renderStatus(title, "未找到同步歌词");
+    }
+    return;
+  }
+
+  var line = findLyricLine(state.currentLyrics, musicState.position);
+  if (musicState.playbackState === "paused") {
+    renderStatus(title, "暂停 · " + line);
+  } else {
+    renderStatus(title, line);
+  }
+}
+
+function resetCurrentTrack() {
+  state.currentMeta = null;
+  state.currentKey = "";
+  state.currentLyrics = [];
+  state.currentLyricsSource = "";
+  state.lastDisplayLine = "";
+  state.lastLookupKey = "";
+  state.lastError = "";
+}
+
+function readMusicState() {
+  try {
+    var music = Application("Music");
+    if (!music.running()) {
+      return { kind: "waiting" };
+    }
+
+    var playbackState = String(music.playerState());
+    if (playbackState === "stopped") {
+      return { kind: "stopped" };
+    }
+
+    var track = music.currentTrack;
+    if (!track) {
+      return { kind: "stopped" };
+    }
+
+    var meta = {
+      title: safeMusicValue(function() { return track.name(); }),
+      artist: safeMusicValue(function() { return track.artist(); }),
+      album: safeMusicValue(function() { return track.album(); }),
+      duration: toNumber(safeMusicValue(function() { return track.duration(); })),
+      position: toNumber(safeMusicValue(function() { return music.playerPosition(); })),
+      persistentId: safeMusicValue(function() { return track.persistentID(); }),
+      databaseId: safeMusicValue(function() { return track.databaseID(); })
+    };
+
+    if (!meta.title && !meta.artist) {
+      return { kind: "stopped" };
+    }
+
+    return {
+      kind: "ready",
+      playbackState: playbackState,
+      position: meta.position || 0,
+      meta: meta
+    };
+  } catch (error) {
+    if (looksLikeMusicUnavailableError(error)) {
+      return { kind: "waiting" };
+    }
+    if (looksLikeAutomationPermissionError(error)) {
+      return { kind: "permission" };
+    }
+    return { kind: "error", error: String(error) };
+  }
+}
+
+function safeMusicValue(getter) {
+  try {
+    var value = getter();
+    if (value === null || value === undefined) {
+      return "";
+    }
+    return String(value);
+  } catch (_error) {
+    return "";
+  }
+}
+
+function looksLikeMusicUnavailableError(error) {
+  var message = String(error).toLowerCase();
+  return message.indexOf("application can't be found") >= 0 ||
+    message.indexOf("应用程序") >= 0 && message.indexOf("找不到") >= 0;
+}
+
+function looksLikeAutomationPermissionError(error) {
+  var message = String(error).toLowerCase();
+  return message.indexOf("-1743") >= 0 ||
+    message.indexOf("not authorized") >= 0 ||
+    message.indexOf("not permitted") >= 0 ||
+    message.indexOf("automation") >= 0 ||
+    message.indexOf("权限") >= 0 ||
+    message.indexOf("不允许") >= 0;
+}
+
+function resolveLyricsForCurrentTrack(meta, key) {
+  state.lastError = "";
+  state.lastLookupKey = key;
+
+  var override = findOverride(meta);
+  if (override) {
+    var loaded = loadLyricsFromOverride(override);
+    if (loaded.ok) {
+      state.currentLyrics = loaded.lines;
+      state.currentLyricsSource = override.source || "override";
+      return;
+    }
+    state.lastError = loaded.message;
+  }
+
+  try {
+    var exact = fetchLrclibExact(meta);
+    if (exact && exact.syncedLyrics) {
+      var exactLines = parseLrc(exact.syncedLyrics || "");
+      if (exactLines.length > 0) {
+        state.currentLyrics = exactLines;
+        state.currentLyricsSource = "lrclib:" + exact.id;
+        return;
+      }
+    }
+
+    var candidates = searchLrclibCandidates(meta);
+    var best = chooseBestCandidate(meta, candidates);
+    if (!best) {
+      state.currentLyrics = [];
+      state.currentLyricsSource = "";
+      state.lastError = "未找到同步歌词";
+      return;
+    }
+
+    var lines = parseLrc(best.syncedLyrics || "");
+    if (lines.length === 0) {
+      state.lastError = "未找到同步歌词";
+      return;
+    }
+
+    state.currentLyrics = lines;
+    state.currentLyricsSource = "lrclib:" + best.id;
+  } catch (error) {
+    state.currentLyrics = [];
+    state.currentLyricsSource = "";
+    state.lastError = "歌词服务暂不可用";
+  }
+}
+
+function findOverride(meta) {
+  if (!state.overrides) {
+    state.overrides = loadOverrides();
+  }
+  var keys = makeTrackKeys(meta);
+  for (var i = 0; i < keys.length; i++) {
+    if (state.overrides.tracks[keys[i]]) {
+      return state.overrides.tracks[keys[i]];
+    }
+  }
+  return null;
+}
+
+function loadLyricsFromOverride(override) {
+  try {
+    if (override.source === "manual-lrc" && override.lrcText) {
+      var manualLines = parseLrc(override.lrcText);
+      if (manualLines.length > 0) {
+        return { ok: true, lines: manualLines };
+      }
+      return { ok: false, message: "本地 LRC 无可用时间戳" };
+    }
+
+    if (override.source === "lrclib" && override.lrclibId) {
+      var item = fetchLrclibById(override.lrclibId);
+      var lines = parseLrc(item.syncedLyrics || "");
+      if (lines.length > 0) {
+        return { ok: true, lines: lines };
+      }
+      return { ok: false, message: "未找到同步歌词" };
+    }
+  } catch (_error) {
+    return { ok: false, message: "歌词服务暂不可用" };
+  }
+
+  return { ok: false, message: "本地映射不可用" };
+}
+
+function fetchLrclibExact(meta) {
+  var variants = buildSearchVariants(meta);
+  for (var i = 0; i < variants.length; i++) {
+    try {
+      return fetchJson(LRCLIB_BASE_URL + "/get?" + buildQuery(variants[i]), 8);
+    } catch (_error) {
+      // Try the next cleaned-up variant before falling back to broad search.
+    }
+  }
+  return null;
+}
+
+function searchLrclibCandidates(meta) {
+  var variants = buildSearchVariants(meta);
+  var seen = {};
+  var results = [];
+
+  for (var i = 0; i < variants.length; i++) {
+    var url = LRCLIB_BASE_URL + "/search?" + buildQuery(variants[i]);
+    var items = fetchJson(url, 18);
+    if (!items || !items.length) {
+      continue;
+    }
+    for (var j = 0; j < items.length; j++) {
+      var item = items[j];
+      if (!item || !item.id || seen[item.id]) {
+        continue;
+      }
+      seen[item.id] = true;
+      results.push(item);
+    }
+  }
+
+  return results;
+}
+
+function buildSearchVariants(meta) {
+  var variants = [];
+  var title = meta.title || "";
+  var artist = meta.artist || "";
+  var album = meta.album || "";
+  var duration = Math.round(toNumber(meta.duration));
+  var cleanTitle = cleanTitleForMatch(title);
+  var artists = splitArtists(artist);
+
+  addVariant(variants, title, artist, album, duration);
+  if (cleanTitle && cleanTitle !== title) {
+    addVariant(variants, cleanTitle, artist, album, duration);
+  }
+  if (artists.length > 0 && artists[0] !== artist) {
+    addVariant(variants, cleanTitle || title, artists[0], album, duration);
+  }
+  if (album) {
+    addVariant(variants, title, artist, "", duration);
+  }
+
+  return variants;
+}
+
+function addVariant(variants, title, artist, album, duration) {
+  var params = {};
+  if (title) {
+    params.track_name = title;
+  }
+  if (artist) {
+    params.artist_name = artist;
+  }
+  if (album) {
+    params.album_name = album;
+  }
+  if (duration) {
+    params.duration = String(duration);
+  }
+
+  var signature = JSON.stringify(params);
+  for (var i = 0; i < variants.length; i++) {
+    if (JSON.stringify(variants[i]) === signature) {
+      return;
+    }
+  }
+  variants.push(params);
+}
+
+function chooseBestCandidate(meta, candidates) {
+  var best = null;
+  var bestScore = -9999;
+
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = candidates[i];
+    var score = scoreCandidate(meta, candidate);
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+
+  if (!best || !best.syncedLyrics || bestScore < 35) {
+    return null;
+  }
+
+  return best;
+}
+
+function scoreCandidate(meta, candidate) {
+  var score = 0;
+
+  if (candidate.syncedLyrics) {
+    score += 60;
+  } else {
+    score -= 1000;
+  }
+
+  score += similarityScore(meta.title, candidate.trackName) * 38;
+  score += similarityScore(meta.artist, candidate.artistName) * 24;
+  score += similarityScore(meta.album, candidate.albumName) * 10;
+
+  var duration = Math.round(toNumber(meta.duration));
+  var candidateDuration = Math.round(toNumber(candidate.duration));
+  if (duration && candidateDuration) {
+    var diff = Math.abs(duration - candidateDuration);
+    if (diff <= 2) {
+      score += 22;
+    } else if (diff <= 5) {
+      score += 14;
+    } else if (diff <= 10) {
+      score += 6;
+    } else {
+      score -= Math.min(28, diff / 2);
+    }
+  }
+
+  return score;
+}
+
+function similarityScore(left, right) {
+  var a = normalizeForCompare(cleanTitleForMatch(left || ""));
+  var b = normalizeForCompare(cleanTitleForMatch(right || ""));
+  if (!a || !b) {
+    return 0;
+  }
+  if (a === b) {
+    return 1;
+  }
+  if (a.indexOf(b) >= 0 || b.indexOf(a) >= 0) {
+    return 0.72;
+  }
+
+  var aTokens = a.split(" ");
+  var bTokens = b.split(" ");
+  var hits = 0;
+  for (var i = 0; i < aTokens.length; i++) {
+    if (aTokens[i] && bTokens.indexOf(aTokens[i]) >= 0) {
+      hits += 1;
+    }
+  }
+  return hits / Math.max(aTokens.length, bTokens.length);
+}
+
+function fetchLrclibById(id) {
+  return fetchJson(LRCLIB_BASE_URL + "/get/" + encodeURIComponent(String(id)), 10);
+}
+
+function fetchJson(url, timeoutSeconds) {
+  var timeout = timeoutSeconds || 12;
+  var command = "/usr/bin/curl --fail --silent --show-error --location --compressed --max-time " +
+    String(timeout) + " --user-agent " +
+    shellQuote(USER_AGENT) + " " + shellQuote(url);
+  var output = app.doShellScript(command);
+  return JSON.parse(output);
+}
+
+function buildQuery(params) {
+  var pairs = [];
+  var keys = Object.keys(params);
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    if (params[key] !== "" && params[key] !== null && params[key] !== undefined) {
+      pairs.push(encodeURIComponent(key) + "=" + encodeURIComponent(String(params[key])));
+    }
+  }
+  return pairs.join("&");
+}
+
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+function parseLrc(text) {
+  var lines = [];
+  var sourceLines = String(text || "").replace(/\r/g, "").split("\n");
+
+  for (var i = 0; i < sourceLines.length; i++) {
+    var raw = sourceLines[i];
+    var matches = [];
+    var regex = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+    var match = null;
+
+    while ((match = regex.exec(raw)) !== null) {
+      var minutes = parseInt(match[1], 10);
+      var seconds = parseInt(match[2], 10);
+      var fraction = match[3] || "0";
+      var millis = parseFractionMillis(fraction);
+      matches.push(minutes * 60 + seconds + millis / 1000);
+    }
+
+    if (matches.length === 0) {
+      continue;
+    }
+
+    var lyric = raw.replace(regex, "").trim();
+    for (var j = 0; j < matches.length; j++) {
+      lines.push({
+        time: matches[j],
+        text: lyric || "♪"
+      });
+    }
+  }
+
+  lines.sort(function(a, b) {
+    return a.time - b.time;
+  });
+
+  return lines;
+}
+
+function parseFractionMillis(value) {
+  var text = String(value || "0");
+  if (text.length === 1) {
+    return parseInt(text, 10) * 100;
+  }
+  if (text.length === 2) {
+    return parseInt(text, 10) * 10;
+  }
+  return parseInt(text.substring(0, 3), 10);
+}
+
+function findLyricLine(lines, position) {
+  if (!lines || lines.length === 0) {
+    return "未找到同步歌词";
+  }
+
+  var current = lines[0].text;
+  var time = toNumber(position) + 0.15;
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].time <= time) {
+      current = lines[i].text;
+    } else {
+      break;
+    }
+  }
+  return current || "♪";
+}
+
+function openCorrectionPanel() {
+  if (state.correctionPanel) {
+    populateCorrectionFields();
+    state.correctionPanel.makeKeyAndOrderFront(null);
+    $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+    return;
+  }
+
+  var width = 520;
+  var height = 482;
+  var panel = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(
+    $.NSMakeRect(0, 0, width, height),
+    $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable,
+    $.NSBackingStoreBuffered,
+    false
+  );
+  panel.setTitle($("人工补充歌词"));
+  panel.setFloatingPanel(true);
+  panel.setLevel($.NSFloatingWindowLevel);
+
+  var content = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, width, height));
+  var y = height - 52;
+
+  state.fields.title = addTextField(content, "歌名", 22, y, 332, state.currentMeta ? state.currentMeta.title : "");
+  state.fields.artist = addTextField(content, "歌手", 22, y - 44, 332, state.currentMeta ? state.currentMeta.artist : "");
+  state.fields.album = addTextField(content, "专辑", 22, y - 88, 332, state.currentMeta ? state.currentMeta.album : "");
+  state.fields.duration = addTextField(content, "时长", 386, y, 90, state.currentMeta ? String(Math.round(toNumber(state.currentMeta.duration))) : "");
+  state.fields.lrclibId = addTextField(content, "LRCLIB ID", 386, y - 44, 90, "");
+
+  var searchButton = $.NSButton.buttonWithTitleTargetAction($("重新搜索"), state.controller, "searchCandidates:");
+  searchButton.setFrame($.NSMakeRect(386, y - 92, 90, 30));
+  searchButton.setBezelStyle($.NSBezelStyleRounded);
+  content.addSubview(searchButton);
+
+  addStaticLabel(content, "候选", 22, y - 134, 56, 18);
+  var popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(86, y - 140, 390, 28), false);
+  popup.addItemWithTitle($("暂无候选"));
+  content.addSubview(popup);
+  state.candidatePopup = popup;
+
+  addStaticLabel(content, "LRC", 22, y - 184, 56, 18);
+  var scroll = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(86, 86, 390, 172));
+  scroll.setHasVerticalScroller(true);
+  scroll.setBorderType($.NSBezelBorder);
+  var lrcView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 390, 172));
+  lrcView.setFont($.NSFont.userFixedPitchFontOfSize(12));
+  scroll.setDocumentView(lrcView);
+  content.addSubview(scroll);
+  state.fields.lrcText = lrcView;
+
+  var saveButton = $.NSButton.buttonWithTitleTargetAction($("保存"), state.controller, "saveCorrection:");
+  saveButton.setFrame($.NSMakeRect(302, 28, 82, 32));
+  saveButton.setBezelStyle($.NSBezelStyleRounded);
+  content.addSubview(saveButton);
+
+  var cancelButton = $.NSButton.buttonWithTitleTargetAction($("取消"), state.controller, "cancelCorrection:");
+  cancelButton.setFrame($.NSMakeRect(394, 28, 82, 32));
+  cancelButton.setBezelStyle($.NSBezelStyleRounded);
+  content.addSubview(cancelButton);
+
+  panel.setContentView(content);
+  panel.center;
+  state.correctionPanel = panel;
+  populateCorrectionFields();
+  panel.makeKeyAndOrderFront(null);
+  $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+}
+
+function addStaticLabel(content, text, x, y, width, height) {
+  var label = $.NSTextField.alloc.initWithFrame($.NSMakeRect(x, y, width, height));
+  label.setStringValue($(text));
+  label.setEditable(false);
+  label.setSelectable(false);
+  label.setBordered(false);
+  label.setDrawsBackground(false);
+  label.setTextColor($.NSColor.secondaryLabelColor);
+  label.setAlignment($.NSTextAlignmentRight);
+  content.addSubview(label);
+  return label;
+}
+
+function addTextField(content, labelText, x, y, inputWidth, value) {
+  addStaticLabel(content, labelText, x, y + 6, 56, 18);
+  var field = $.NSTextField.alloc.initWithFrame($.NSMakeRect(x + 64, y, inputWidth, 28));
+  field.setStringValue($(value || ""));
+  content.addSubview(field);
+  return field;
+}
+
+function populateCorrectionFields() {
+  if (!state.currentMeta || !state.fields.title) {
+    return;
+  }
+  state.fields.title.setStringValue($(state.currentMeta.title || ""));
+  state.fields.artist.setStringValue($(state.currentMeta.artist || ""));
+  state.fields.album.setStringValue($(state.currentMeta.album || ""));
+  state.fields.duration.setStringValue($(String(Math.round(toNumber(state.currentMeta.duration)))));
+}
+
+function closeCorrectionPanel() {
+  if (state.correctionPanel) {
+    state.correctionPanel.orderOut(null);
+  }
+}
+
+function readManualMeta() {
+  return {
+    title: fieldString("title"),
+    artist: fieldString("artist"),
+    album: fieldString("album"),
+    duration: toNumber(fieldString("duration")),
+    persistentId: state.currentMeta ? state.currentMeta.persistentId : "",
+    databaseId: state.currentMeta ? state.currentMeta.databaseId : ""
+  };
+}
+
+function fieldString(name) {
+  var field = state.fields[name];
+  if (!field) {
+    return "";
+  }
+  return String(ObjC.unwrap(field.stringValue)).trim();
+}
+
+function textViewString(view) {
+  if (!view) {
+    return "";
+  }
+  return String(ObjC.unwrap(view.string)).trim();
+}
+
+function searchManualCandidates() {
+  var popup = state.candidatePopup;
+  if (!popup) {
+    return;
+  }
+
+  popup.removeAllItems;
+  popup.addItemWithTitle($("正在搜索..."));
+  state.manualCandidates = [];
+
+  try {
+    var meta = readManualMeta();
+    var candidates = searchLrclibCandidates(meta);
+    candidates.sort(function(a, b) {
+      return scoreCandidate(meta, b) - scoreCandidate(meta, a);
+    });
+    state.manualCandidates = candidates;
+
+    popup.removeAllItems;
+    if (candidates.length === 0) {
+      popup.addItemWithTitle($("没有候选"));
+      return;
+    }
+
+    for (var i = 0; i < Math.min(candidates.length, 20); i++) {
+      var item = candidates[i];
+      var label = "#" + item.id + " · " +
+        compact(item.trackName, 24) + " - " +
+        compact(item.artistName, 18) +
+        (item.syncedLyrics ? " · 同步" : " · 无同步") +
+        (item.duration ? " · " + Math.round(item.duration) + "s" : "");
+      popup.addItemWithTitle($(label));
+    }
+  } catch (_error) {
+    popup.removeAllItems;
+    popup.addItemWithTitle($("歌词服务暂不可用"));
+  }
+}
+
+function saveCorrection() {
+  var meta = readManualMeta();
+  var lrcText = textViewString(state.fields.lrcText);
+  var lrclibId = fieldString("lrclibId");
+  var selectedCandidate = getSelectedManualCandidate();
+  var entry = null;
+  var parsedLines = [];
+
+  if (lrcText) {
+    parsedLines = parseLrc(lrcText);
+    if (parsedLines.length === 0) {
+      renderStatus(formatTrackTitle(meta, "paused"), "粘贴的 LRC 没有可用时间戳");
+      return;
+    }
+    entry = {
+      title: meta.title,
+      artist: meta.artist,
+      album: meta.album,
+      duration: Math.round(toNumber(meta.duration)),
+      source: "manual-lrc",
+      lrcText: lrcText,
+      updatedAt: new Date().toISOString()
+    };
+  } else {
+    var id = lrclibId || (selectedCandidate ? String(selectedCandidate.id) : "");
+    if (!id) {
+      renderStatus(formatTrackTitle(meta, "paused"), "请填写 LRCLIB ID、选择候选或粘贴 LRC");
+      return;
+    }
+
+    try {
+      var item = fetchLrclibById(id);
+      parsedLines = parseLrc(item.syncedLyrics || "");
+      if (parsedLines.length === 0) {
+        renderStatus(formatTrackTitle(meta, "paused"), "该 LRCLIB 条目没有同步歌词");
+        return;
+      }
+      entry = {
+        title: meta.title || item.trackName || "",
+        artist: meta.artist || item.artistName || "",
+        album: meta.album || item.albumName || "",
+        duration: Math.round(toNumber(meta.duration || item.duration)),
+        source: "lrclib",
+        lrclibId: parseInt(id, 10),
+        updatedAt: new Date().toISOString()
+      };
+    } catch (_error) {
+      renderStatus(formatTrackTitle(meta, "paused"), "歌词服务暂不可用");
+      return;
+    }
+  }
+
+  var keys = makeTrackKeys(meta);
+  var key = keys[0];
+  if (!state.overrides) {
+    state.overrides = loadOverrides();
+  }
+  state.overrides.tracks[key] = entry;
+  saveOverrides();
+
+  state.currentMeta = meta;
+  state.currentKey = makeTrackKey(meta);
+  state.currentLyrics = parsedLines;
+  state.currentLyricsSource = entry.source;
+  state.lastError = "";
+  renderStatus(formatTrackTitle(meta, "paused"), findLyricLine(parsedLines, state.currentMeta ? state.currentMeta.position : 0));
+  closeCorrectionPanel();
+}
+
+function getSelectedManualCandidate() {
+  if (!state.candidatePopup || !state.manualCandidates || state.manualCandidates.length === 0) {
+    return null;
+  }
+  var index = state.candidatePopup.indexOfSelectedItem;
+  if (index < 0 || index >= state.manualCandidates.length) {
+    return null;
+  }
+  return state.manualCandidates[index];
+}
+
+function makeTrackKey(meta) {
+  return makeTrackKeys(meta)[0];
+}
+
+function makeTrackKeys(meta) {
+  var keys = [];
+  if (meta && meta.persistentId) {
+    keys.push("music-track-id:" + meta.persistentId);
+  } else if (meta && meta.databaseId) {
+    keys.push("music-track-id:" + meta.databaseId);
+  }
+
+  var artist = normalizeForKey(meta ? meta.artist : "");
+  var title = normalizeForKey(meta ? meta.title : "");
+  var duration = Math.round(toNumber(meta ? meta.duration : 0));
+  if (artist || title || duration) {
+    keys.push("normalized:" + artist + "|" + title + "|" + duration);
+  }
+
+  if (keys.length === 0) {
+    keys.push("normalized:unknown|unknown|0");
+  }
+  return keys;
+}
+
+function formatTrackTitle(meta, playbackState) {
+  var title = meta && meta.title ? meta.title : PRODUCT_NAME;
+  var artist = meta && meta.artist ? meta.artist : "";
+  var prefix = playbackState === "paused" ? "暂停 · " : "";
+  if (artist) {
+    return prefix + title + " - " + artist;
+  }
+  return prefix + title;
+}
+
+function normalizeForKey(value) {
+  return normalizeForCompare(value).replace(/\s+/g, "-") || "unknown";
+}
+
+function normalizeForCompare(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[^\w\u4e00-\u9fff]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanTitleForMatch(title) {
+  return String(title || "")
+    .replace(/\s*[\(\[\{（【][^\)\]\}）】]*(live|remaster|remastered|feat\.?|featuring|version|edit|mono|stereo|explicit|deluxe|bonus|伴奏|翻唱|现场)[^\)\]\}）】]*[\)\]\}）】]\s*/ig, " ")
+    .replace(/\s+-\s*(live|remaster(?:ed)?|radio edit|single version|album version).*$/ig, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitArtists(artist) {
+  var raw = String(artist || "");
+  if (!raw) {
+    return [];
+  }
+  var parts = raw.split(/\s*(?:,|，|、|\/|;|；|&|\band\b|\bfeat\.?\b|\bfeaturing\b)\s*/i);
+  var cleaned = [];
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i].trim();
+    if (part && cleaned.indexOf(part) < 0) {
+      cleaned.push(part);
+    }
+  }
+  return cleaned;
+}
+
+function toNumber(value) {
+  var number = parseFloat(value);
+  if (isNaN(number)) {
+    return 0;
+  }
+  return number;
+}
+
+function compact(value, maxLength) {
+  var text = String(value || "");
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return text.substring(0, maxLength - 1) + "…";
+}
+
+function runSelfTest() {
+  ensureDataFiles();
+  var sample = "[00:00.00]Intro\n[00:01.50]第一句\n[00:03.00][00:04.00]重复句";
+  var lines = parseLrc(sample);
+  assert(lines.length === 4, "LRC parser should support multiple timestamps");
+  assert(findLyricLine(lines, 1.55) === "第一句", "Current lyric should match playback position");
+  assert(findLyricLine(lines, 4.2) === "重复句", "Current lyric should match repeated timestamp");
+  assert(normalizeForKey("Artist Name") === "artist-name", "Normalize key should be stable");
+  JSON.parse(readTextFile(OVERRIDES_PATH));
+  console.log("self-test passed");
+}
+
+function runUiSmokeTest() {
+  ensureDataFiles();
+  state.overrides = loadOverrides();
+  state.currentMeta = {
+    title: "测试歌曲",
+    artist: "测试歌手",
+    album: "测试专辑",
+    duration: 180,
+    position: 0,
+    persistentId: "ui-smoke",
+    databaseId: ""
+  };
+
+  var nsApp = $.NSApplication.sharedApplication;
+  nsApp.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  registerControllerClass();
+  state.controller = $.LyricIslandController.alloc.init;
+  createIslandWindow();
+  renderStatus("测试歌曲 - 测试歌手", "这是一句用于检查窗口渲染的歌词");
+  openCorrectionPanel();
+  if (state.correctionPanel) {
+    state.correctionPanel.close;
+  }
+  if (state.window) {
+    state.window.close;
+  }
+  console.log("ui-smoke passed");
+}
+
+function runLrclibSmokeTest() {
+  var meta = {
+    title: "Yellow",
+    artist: "Coldplay",
+    album: "Parachutes",
+    duration: 267
+  };
+  var best = fetchLrclibExact(meta);
+  if (!best || !best.syncedLyrics) {
+    var candidates = searchLrclibCandidates(meta);
+    best = chooseBestCandidate(meta, candidates);
+  }
+  assert(!!best, "LRCLIB should return a synced lyric candidate");
+  var lines = parseLrc(best.syncedLyrics || "");
+  assert(lines.length > 0, "Best LRCLIB candidate should contain parseable synced lyrics");
+  console.log("lrclib-smoke passed: id=" + best.id + ", lines=" + lines.length);
+}
+
+function runMusicSmokeTest() {
+  var snapshot = readMusicState();
+  console.log(JSON.stringify(snapshot, null, 2));
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
