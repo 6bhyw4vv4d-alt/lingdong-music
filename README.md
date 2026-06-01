@@ -13,9 +13,20 @@
 
 ## 启动
 
+先进入项目目录，再启动：
+
 ```bash
+cd /Users/xyx/项目/灵动音乐
 osascript -l JavaScript lyric-island.jxa
 ```
+
+也可以从任意目录用完整路径启动：
+
+```bash
+/Users/xyx/项目/灵动音乐/run.sh
+```
+
+如果看到 `No such file or directory`，通常是因为当前终端目录不在项目目录里。可以先运行 `pwd` 看当前位置；终端提示符是 `~` 时，表示你还在用户主目录。
 
 首次读取 Music.app 时，macOS 可能会请求允许终端或脚本控制 Music.app。请在系统弹窗里允许；如果拒绝过，可以到“系统设置 > 隐私与安全性 > 自动化”里重新允许。
 
@@ -37,6 +48,8 @@ scripts/smoke-test.sh
 - 粘贴 LRC 文本并保存。
 
 保存后的映射会写入 `data/overrides.json`。脚本优先使用 Apple Music 曲目 ID；取不到时使用规范化后的歌手、歌名和时长作为 key。
+
+如果歌名和歌手已经正确，但仍显示“未找到同步歌词”，通常表示 LRCLIB 当前没有收录这首歌的同步歌词。此时可以点击“修正”，粘贴带时间戳的 LRC 文本并保存；以后播放同一首歌会优先使用这份本地映射。
 
 ## 数据和隐私
 

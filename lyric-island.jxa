@@ -292,7 +292,7 @@ function pollAndRender() {
   }
 
   var meta = musicState.meta;
-  var key = makeTrackKey(meta);
+  var key = makeTrackFingerprint(meta);
   var title = formatTrackTitle(meta, musicState.playbackState);
 
   if (key !== state.currentKey) {
@@ -334,7 +334,10 @@ function resetCurrentTrack() {
 
 function readMusicState() {
   try {
-    var music = Application("Music");
+    var music = getMusicApplication();
+    if (!music) {
+      return { kind: "waiting" };
+    }
     if (!music.running()) {
       return { kind: "waiting" };
     }
@@ -380,13 +383,31 @@ function readMusicState() {
   }
 }
 
+function getMusicApplication() {
+  var names = ["Music", "音乐", "iTunes"];
+  for (var i = 0; i < names.length; i++) {
+    try {
+      return Application(names[i]);
+    } catch (_error) {
+    }
+  }
+  return null;
+}
+
 function safeMusicValue(getter) {
   try {
     var value = getter();
     if (value === null || value === undefined) {
       return "";
     }
-    return String(value);
+    var text = String(value).trim();
+    if (!text ||
+      text === "missing value" ||
+      text === "undefined" ||
+      text === "null") {
+      return "";
+    }
+    return text;
   } catch (_error) {
     return "";
   }
@@ -497,7 +518,7 @@ function loadLyricsFromOverride(override) {
 }
 
 function fetchLrclibExact(meta) {
-  var variants = buildSearchVariants(meta);
+  var variants = buildExactSearchVariants(meta);
   for (var i = 0; i < variants.length; i++) {
     try {
       return fetchJson(LRCLIB_BASE_URL + "/get?" + buildQuery(variants[i]), 8);
@@ -506,6 +527,23 @@ function fetchLrclibExact(meta) {
     }
   }
   return null;
+}
+
+function buildExactSearchVariants(meta) {
+  var variants = [];
+  var titleCandidates = titleSearchCandidates(meta.title || "");
+  var artist = meta.artist || "";
+  var album = meta.album || "";
+  var duration = Math.round(toNumber(meta.duration));
+
+  for (var i = 0; i < titleCandidates.length; i++) {
+    addVariant(variants, titleCandidates[i], artist, album, duration);
+    if (album) {
+      addVariant(variants, titleCandidates[i], artist, "", duration);
+    }
+  }
+
+  return variants;
 }
 
 function searchLrclibCandidates(meta) {
@@ -538,21 +576,37 @@ function buildSearchVariants(meta) {
   var artist = meta.artist || "";
   var album = meta.album || "";
   var duration = Math.round(toNumber(meta.duration));
-  var cleanTitle = cleanTitleForMatch(title);
+  var titleCandidates = titleSearchCandidates(title);
   var artists = splitArtists(artist);
 
-  addVariant(variants, title, artist, album, duration);
-  if (cleanTitle && cleanTitle !== title) {
-    addVariant(variants, cleanTitle, artist, album, duration);
+  for (var i = 0; i < titleCandidates.length; i++) {
+    addBroadSearchVariants(variants, titleCandidates[i], artist, album, duration);
   }
+
   if (artists.length > 0 && artists[0] !== artist) {
-    addVariant(variants, cleanTitle || title, artists[0], album, duration);
-  }
-  if (album) {
-    addVariant(variants, title, artist, "", duration);
+    for (var j = 0; j < titleCandidates.length; j++) {
+      addBroadSearchVariants(variants, titleCandidates[j], artists[0], album, duration);
+    }
   }
 
   return variants;
+}
+
+function addBroadSearchVariants(variants, title, artist, album, duration) {
+  addVariant(variants, title, artist, album, duration);
+  if (album) {
+    addVariant(variants, title, artist, "", duration);
+  }
+  if (duration) {
+    addVariant(variants, title, artist, album, 0);
+    if (album) {
+      addVariant(variants, title, artist, "", 0);
+    }
+  }
+  if (artist) {
+    addVariant(variants, title, artist, "", 0);
+  }
+  addVariant(variants, title, "", "", 0);
 }
 
 function addVariant(variants, title, artist, album, duration) {
@@ -980,7 +1034,7 @@ function saveCorrection() {
   saveOverrides();
 
   state.currentMeta = meta;
-  state.currentKey = makeTrackKey(meta);
+  state.currentKey = makeTrackFingerprint(meta);
   state.currentLyrics = parsedLines;
   state.currentLyricsSource = entry.source;
   state.lastError = "";
@@ -1003,12 +1057,24 @@ function makeTrackKey(meta) {
   return makeTrackKeys(meta)[0];
 }
 
+function makeTrackFingerprint(meta) {
+  var artist = normalizeForKey(meta ? meta.artist : "");
+  var title = normalizeForKey(meta ? meta.title : "");
+  var album = normalizeForKey(meta ? meta.album : "");
+  var duration = Math.round(toNumber(meta ? meta.duration : 0));
+  var id = validMusicId(meta && meta.persistentId) || validMusicId(meta && meta.databaseId) || "no-id";
+  return "playback:" + id + "|" + artist + "|" + title + "|" + album + "|" + duration;
+}
+
 function makeTrackKeys(meta) {
   var keys = [];
-  if (meta && meta.persistentId) {
-    keys.push("music-track-id:" + meta.persistentId);
-  } else if (meta && meta.databaseId) {
-    keys.push("music-track-id:" + meta.databaseId);
+  var persistentId = validMusicId(meta && meta.persistentId);
+  var databaseId = validMusicId(meta && meta.databaseId);
+
+  if (persistentId) {
+    keys.push("music-track-id:" + persistentId);
+  } else if (databaseId) {
+    keys.push("music-track-id:" + databaseId);
   }
 
   var artist = normalizeForKey(meta ? meta.artist : "");
@@ -1022,6 +1088,18 @@ function makeTrackKeys(meta) {
     keys.push("normalized:unknown|unknown|0");
   }
   return keys;
+}
+
+function validMusicId(value) {
+  var text = String(value || "").trim();
+  if (!text ||
+    text === "missing value" ||
+    text === "undefined" ||
+    text === "null" ||
+    text === "0") {
+    return "";
+  }
+  return text;
 }
 
 function formatTrackTitle(meta, playbackState) {
@@ -1054,6 +1132,51 @@ function cleanTitleForMatch(title) {
     .replace(/\s+-\s*(live|remaster(?:ed)?|radio edit|single version|album version).*$/ig, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function titleSearchCandidates(title) {
+  var candidates = [];
+  addUniqueTitle(candidates, title);
+  addUniqueTitle(candidates, cleanTitleForMatch(title));
+
+  var bracketRegex = /[\(\[\{（【]([^\)\]\}）】]+)[\)\]\}）】]/g;
+  var match = null;
+  while ((match = bracketRegex.exec(String(title || ""))) !== null) {
+    var pieces = match[1].split(/[\/／|｜,，、;；]+/);
+    for (var i = 0; i < pieces.length; i++) {
+      var piece = cleanTitlePiece(pieces[i]);
+      if (piece) {
+        addUniqueTitle(candidates, piece);
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function addUniqueTitle(candidates, value) {
+  var text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return;
+  }
+  for (var i = 0; i < candidates.length; i++) {
+    if (normalizeForCompare(candidates[i]) === normalizeForCompare(text)) {
+      return;
+    }
+  }
+  candidates.push(text);
+}
+
+function cleanTitlePiece(value) {
+  var text = String(value || "")
+    .replace(/\b(live|remaster(?:ed)?|feat\.?|featuring|version|edit|mono|stereo|explicit|deluxe|bonus)\b/ig, " ")
+    .replace(/伴奏|翻唱|现场|纯音乐|无损|原版|新版/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalizeForCompare(text).length < 2) {
+    return "";
+  }
+  return text;
 }
 
 function splitArtists(artist) {
@@ -1096,8 +1219,47 @@ function runSelfTest() {
   assert(findLyricLine(lines, 1.55) === "第一句", "Current lyric should match playback position");
   assert(findLyricLine(lines, 4.2) === "重复句", "Current lyric should match repeated timestamp");
   assert(normalizeForKey("Artist Name") === "artist-name", "Normalize key should be stable");
+  assert(validMusicId("missing value") === "", "Missing Music IDs should not become track keys");
+  assert(makeTrackFingerprint({
+    title: "A",
+    artist: "B",
+    album: "",
+    duration: 1,
+    persistentId: "missing value"
+  }) !== makeTrackFingerprint({
+    title: "C",
+    artist: "B",
+    album: "",
+    duration: 1,
+    persistentId: "missing value"
+  }), "Playback fingerprint should change when title changes without a usable Music ID");
+  assert(
+    titleSearchCandidates("解脱 (明明你先说爱我 / 伴奏)").indexOf("明明你先说爱我") >= 0,
+    "Title aliases in brackets should be searchable"
+  );
+  var broadVariants = buildSearchVariants({
+    title: "平行",
+    artist: "张鑫",
+    album: "不知道倦",
+    duration: 249
+  });
+  assert(hasVariant(broadVariants, "平行", "张鑫", "", 0), "Search should fall back without album and duration");
+  assert(hasVariant(broadVariants, "平行", "", "", 0), "Search should fall back to title-only lookup");
   JSON.parse(readTextFile(OVERRIDES_PATH));
   console.log("self-test passed");
+}
+
+function hasVariant(variants, title, artist, album, duration) {
+  for (var i = 0; i < variants.length; i++) {
+    var item = variants[i];
+    if ((item.track_name || "") === title &&
+      (item.artist_name || "") === artist &&
+      (item.album_name || "") === album &&
+      String(item.duration || "") === (duration ? String(duration) : "")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function runUiSmokeTest() {
