@@ -8,7 +8,7 @@ var app = Application.currentApplication();
 app.includeStandardAdditions = true;
 
 var PRODUCT_NAME = "灵动音乐";
-var PRODUCT_VERSION = "0.2.0-beta.1";
+var PRODUCT_VERSION = "0.2.0-beta.2";
 var BUNDLE_IDENTIFIER = "com.lingdongmusic.desktop";
 var LRCLIB_BASE_URL = "https://lrclib.net/api";
 var USER_AGENT = "Lingdong-Music/" + PRODUCT_VERSION + " (macOS JXA beta)";
@@ -45,6 +45,9 @@ var state = {
 
 function run(argv) {
   initializeRuntimePaths();
+  if (!activateExistingInstanceOrContinue()) {
+    return;
+  }
   if (hasArgument(argv, "--self-test")) {
     runSelfTest();
     return;
@@ -66,6 +69,29 @@ function run(argv) {
   state.overrides = loadOverrides();
   state.settings = loadSettings();
   startApp();
+}
+
+function activateExistingInstanceOrContinue() {
+  try {
+    var bundleIdentifier = ObjC.unwrap($.NSBundle.mainBundle.bundleIdentifier);
+    if (bundleIdentifier !== BUNDLE_IDENTIFIER) {
+      return true;
+    }
+
+    var currentPid = toNumber($.NSProcessInfo.processInfo.processIdentifier);
+    var runningApps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(
+      $(BUNDLE_IDENTIFIER)
+    );
+    for (var i = 0; i < runningApps.count; i++) {
+      var candidate = runningApps.objectAtIndex(i);
+      if (toNumber(candidate.processIdentifier) !== currentPid) {
+        candidate.activateWithOptions($.NSApplicationActivateIgnoringOtherApps);
+        return false;
+      }
+    }
+  } catch (_error) {
+  }
+  return true;
 }
 
 function initializeRuntimePaths() {
@@ -378,12 +404,19 @@ function createIslandWindow() {
   content.layer.setCornerRadius(34);
   content.layer.setMasksToBounds(false);
 
-  var titleLabel = makeLabel($.NSMakeRect(72, 50, 476, 22), 13, 0.82, true);
-  var lyricLabel = makeLabel($.NSMakeRect(72, 18, 476, 30), 20, 1.0, true);
+  var titleLabel = makeLabel($.NSMakeRect(72, 50, 448, 22), 13, 0.82, true);
+  var lyricLabel = makeLabel($.NSMakeRect(72, 18, 448, 30), 20, 1.0, true);
   var fixButton = $.NSButton.buttonWithTitleTargetAction($("修正"), state.controller, "openCorrection:");
-  fixButton.setFrame($.NSMakeRect(548, 28, 56, 28));
+  fixButton.setFrame($.NSMakeRect(524, 28, 54, 28));
   fixButton.setBezelStyle($.NSBezelStyleRounded);
   fixButton.setFont($.NSFont.systemFontOfSize(12));
+
+  var quitButton = $.NSButton.buttonWithTitleTargetAction($("×"), state.controller, "quitApp:");
+  quitButton.setFrame($.NSMakeRect(584, 30, 26, 26));
+  quitButton.setBordered(false);
+  quitButton.setFont($.NSFont.systemFontOfSizeWeight(17, $.NSFontWeightMedium));
+  quitButton.setContentTintColor($.NSColor.colorWithCalibratedWhiteAlpha(1, 0.72));
+  quitButton.setToolTip($("退出灵动音乐"));
 
   var dot = $.NSView.alloc.initWithFrame($.NSMakeRect(26, 34, 18, 18));
   dot.setWantsLayer(true);
@@ -396,6 +429,7 @@ function createIslandWindow() {
   content.addSubview(titleLabel);
   content.addSubview(lyricLabel);
   content.addSubview(fixButton);
+  content.addSubview(quitButton);
   window.setContentView(content);
   window.makeKeyAndOrderFront(null);
 

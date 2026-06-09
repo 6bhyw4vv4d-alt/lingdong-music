@@ -8,7 +8,7 @@
 - 系统自带 Music.app / Apple Music
 - 网络可访问 `https://lrclib.net`
 
-1. 从 GitHub Releases 下载 `灵动音乐-v0.2.0-beta.1-macos-universal.dmg`。
+1. 从 GitHub Releases 下载 `Lingdong-Music-v0.2.0-beta.2-macos-universal.dmg`。
 2. 打开 DMG，将 `灵动音乐.app` 拖入 Applications。
 3. 在“应用程序”中右键 `灵动音乐.app`，选择“打开”。
 4. 首次使用时，允许灵动音乐控制 Music.app。
@@ -49,8 +49,8 @@ osascript -l JavaScript lyric-island.jxa
 
 构建产物会写入 `dist/`，默认文件名为：
 
-- `灵动音乐-v0.2.0-beta.1-macos-universal.dmg`
-- `灵动音乐-v0.2.0-beta.1-macos-universal.dmg.sha256`
+- `灵动音乐-v0.2.0-beta.2-macos-universal.dmg`
+- `灵动音乐-v0.2.0-beta.2-macos-universal.dmg.sha256`
 
 ## 数据和隐私
 

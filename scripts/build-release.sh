@@ -2,13 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${1:-0.2.0-beta.1}"
+VERSION="${1:-0.2.0-beta.2}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 PRODUCT_NAME="灵动音乐"
 BUNDLE_ID="com.lingdongmusic.desktop"
 BUILD_DIR="$ROOT/build/release"
 DIST_DIR="$ROOT/dist"
 APP_PATH="$BUILD_DIR/$PRODUCT_NAME.app"
+DIST_APP_PATH="$DIST_DIR/$PRODUCT_NAME.app"
 STAGING_DIR="$BUILD_DIR/dmg"
 DMG_NAME="$PRODUCT_NAME-v$VERSION-macos-universal.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
@@ -18,6 +19,7 @@ ICON_PATH="$ROOT/assets/AppIcon.icns"
 
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$DIST_DIR"
+rm -rf "$DIST_APP_PATH"
 rm -f "$DMG_PATH" "$DMG_PATH.sha256"
 
 "$ROOT/scripts/smoke-test.sh"
@@ -80,6 +82,7 @@ actual_architectures="$(lipo -archs "$APP_PATH/Contents/MacOS/applet")"
 [[ -f "$RESOURCES/AppIcon.icns" ]]
 [[ ! -e "$APP_PATH/Contents/Resources/data" ]]
 
+ditto "$APP_PATH" "$DIST_APP_PATH"
 mkdir -p "$STAGING_DIR"
 cp -R "$APP_PATH" "$STAGING_DIR/$PRODUCT_NAME.app"
 cp "$ROOT/docs/首次使用说明.txt" "$STAGING_DIR/首次使用说明.txt"
@@ -100,5 +103,6 @@ hdiutil verify "$DMG_PATH" >/dev/null
 
 echo ""
 echo "Release artifacts:"
+echo "  $DIST_APP_PATH"
 echo "  $DMG_PATH"
 echo "  $DMG_PATH.sha256"
