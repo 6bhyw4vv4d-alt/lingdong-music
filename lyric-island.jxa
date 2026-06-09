@@ -7,14 +7,21 @@ ObjC.import("AppKit");
 var app = Application.currentApplication();
 app.includeStandardAdditions = true;
 
-var PRODUCT_NAME = "音悦台";
+var PRODUCT_NAME = "灵动音乐";
+var PRODUCT_VERSION = "0.2.0-beta.1";
+var BUNDLE_IDENTIFIER = "com.lingdongmusic.desktop";
 var LRCLIB_BASE_URL = "https://lrclib.net/api";
-var USER_AGENT = "Yinyuetai-Lyric-Island/0.1 (personal macOS JXA prototype)";
-var PROJECT_ROOT = ObjC.unwrap($.NSFileManager.defaultManager.currentDirectoryPath);
-var OVERRIDES_PATH = PROJECT_ROOT + "/data/overrides.json";
+var USER_AGENT = "Lingdong-Music/" + PRODUCT_VERSION + " (macOS JXA beta)";
+var PROJECT_ROOT = "";
+var LEGACY_DATA_ROOT = "";
+var DATA_ROOT = "";
+var OVERRIDES_PATH = "";
+var SETTINGS_PATH = "";
 
 var state = {
   window: null,
+  statusItem: null,
+  visibilityMenuItem: null,
   titleLabel: null,
   lyricLabel: null,
   statusButton: null,
@@ -27,47 +34,131 @@ var state = {
   currentKey: "",
   currentLyrics: [],
   currentLyricsSource: "",
+  currentLrclibId: "",
+  currentOffsetSeconds: 0,
   lastDisplayLine: "",
   lastLookupKey: "",
   lastError: "",
-  overrides: null
+  overrides: null,
+  settings: null
 };
 
 function run(argv) {
-  argv = argv || [];
-  if (argv.indexOf("--self-test") >= 0) {
+  initializeRuntimePaths();
+  if (hasArgument(argv, "--self-test")) {
     runSelfTest();
     return;
   }
-  if (argv.indexOf("--ui-smoke") >= 0) {
+  if (hasArgument(argv, "--ui-smoke")) {
     runUiSmokeTest();
     return;
   }
-  if (argv.indexOf("--lrclib-smoke") >= 0) {
+  if (hasArgument(argv, "--lrclib-smoke")) {
     runLrclibSmokeTest();
     return;
   }
-  if (argv.indexOf("--music-smoke") >= 0) {
+  if (hasArgument(argv, "--music-smoke")) {
     runMusicSmokeTest();
     return;
   }
 
   ensureDataFiles();
   state.overrides = loadOverrides();
+  state.settings = loadSettings();
   startApp();
+}
+
+function initializeRuntimePaths() {
+  PROJECT_ROOT = ObjC.unwrap($.NSFileManager.defaultManager.currentDirectoryPath);
+  LEGACY_DATA_ROOT = PROJECT_ROOT + "/data";
+
+  var configuredDataRoot = environmentValue("LINGDONG_MUSIC_DATA_DIR");
+  var applicationSupportPaths = $.NSSearchPathForDirectoriesInDomains(
+    $.NSApplicationSupportDirectory,
+    $.NSUserDomainMask,
+    true
+  );
+  var applicationSupport = ObjC.unwrap(applicationSupportPaths.objectAtIndex(0));
+  DATA_ROOT = configuredDataRoot || applicationSupport + "/" + PRODUCT_NAME;
+  OVERRIDES_PATH = DATA_ROOT + "/overrides.json";
+  SETTINGS_PATH = DATA_ROOT + "/settings.json";
+}
+
+function hasArgument(argv, expected) {
+  if (!argv) {
+    return false;
+  }
+  try {
+    if (typeof argv.indexOf === "function") {
+      return argv.indexOf(expected) >= 0;
+    }
+  } catch (_error) {
+  }
+  try {
+    var length = toNumber(argv.length);
+    for (var i = 0; i < length; i++) {
+      if (String(argv[i]) === expected) {
+        return true;
+      }
+    }
+  } catch (_error2) {
+  }
+  return false;
 }
 
 function ensureDataFiles() {
   var fm = $.NSFileManager.defaultManager;
   fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
-    $(PROJECT_ROOT + "/data"),
+    $(DATA_ROOT),
     true,
     $.NSDictionary.dictionary,
     null
   );
+  migrateLegacyDataFile("overrides.json");
+  migrateLegacyDataFile("settings.json");
   if (!fm.fileExistsAtPath($(OVERRIDES_PATH))) {
     writeTextFile(OVERRIDES_PATH, JSON.stringify({ version: 1, tracks: {} }, null, 2) + "\n");
   }
+  if (!fm.fileExistsAtPath($(SETTINGS_PATH))) {
+    writeTextFile(SETTINGS_PATH, JSON.stringify(defaultSettings(), null, 2) + "\n");
+  }
+}
+
+function environmentValue(name) {
+  try {
+    var value = $.NSProcessInfo.processInfo.environment.objectForKey($(name));
+    var unwrapped = ObjC.unwrap(value);
+    if (unwrapped === null || unwrapped === undefined) {
+      return "";
+    }
+    var text = String(unwrapped).trim();
+    return text === "undefined" || text === "null" ? "" : text;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function migrateLegacyDataFile(filename) {
+  if (environmentValue("LINGDONG_MUSIC_DATA_DIR")) {
+    return;
+  }
+  var fm = $.NSFileManager.defaultManager;
+  var source = LEGACY_DATA_ROOT + "/" + filename;
+  var destination = DATA_ROOT + "/" + filename;
+  if (source === destination ||
+    !fm.fileExistsAtPath($(source)) ||
+    fm.fileExistsAtPath($(destination))) {
+    return;
+  }
+  fm.copyItemAtPathToPathError($(source), $(destination), null);
+}
+
+function defaultSettings() {
+  return {
+    version: 1,
+    lyricFontSize: 20,
+    lyricColorHex: "#FFFFFF"
+  };
 }
 
 function loadOverrides() {
@@ -86,6 +177,69 @@ function loadOverrides() {
 function saveOverrides() {
   ensureDataFiles();
   writeTextFile(OVERRIDES_PATH, JSON.stringify(state.overrides, null, 2) + "\n");
+}
+
+function loadSettings() {
+  try {
+    var parsed = JSON.parse(readTextFile(SETTINGS_PATH));
+    return normalizeSettings(parsed);
+  } catch (_error) {
+    return defaultSettings();
+  }
+}
+
+function saveSettings() {
+  ensureDataFiles();
+  state.settings = normalizeSettings(state.settings);
+  writeTextFile(SETTINGS_PATH, JSON.stringify(state.settings, null, 2) + "\n");
+}
+
+function normalizeSettings(settings) {
+  var defaults = defaultSettings();
+  var incoming = settings || {};
+  return {
+    version: 1,
+    lyricFontSize: clampLyricFontSize(incoming.lyricFontSize || defaults.lyricFontSize),
+    lyricColorHex: normalizeHexColor(incoming.lyricColorHex || defaults.lyricColorHex)
+  };
+}
+
+function clampLyricFontSize(value) {
+  var size = Math.round(toNumber(value));
+  if (!size) {
+    size = defaultSettings().lyricFontSize;
+  }
+  if (size < 14) {
+    return 14;
+  }
+  if (size > 30) {
+    return 30;
+  }
+  return size;
+}
+
+function normalizeHexColor(value) {
+  var text = String(value || "").trim();
+  if (text.charAt(0) !== "#") {
+    text = "#" + text;
+  }
+  if (/^#[0-9a-fA-F]{3}$/.test(text)) {
+    text = "#" + text.charAt(1) + text.charAt(1) +
+      text.charAt(2) + text.charAt(2) +
+      text.charAt(3) + text.charAt(3);
+  }
+  if (!/^#[0-9a-fA-F]{6}$/.test(text)) {
+    return defaultSettings().lyricColorHex;
+  }
+  return text.toUpperCase();
+}
+
+function nsColorFromHex(value) {
+  var hex = normalizeHexColor(value).substring(1);
+  var red = parseInt(hex.substring(0, 2), 16) / 255;
+  var green = parseInt(hex.substring(2, 4), 16) / 255;
+  var blue = parseInt(hex.substring(4, 6), 16) / 255;
+  return $.NSColor.colorWithCalibratedRedGreenBlueAlpha(red, green, blue, 1);
 }
 
 function readTextFile(path) {
@@ -113,6 +267,7 @@ function startApp() {
   state.controller = $.LyricIslandController.alloc.init;
 
   createIslandWindow();
+  createStatusMenu();
   renderStatus("等待 Music.app", "打开 Music.app 播放歌曲后会自动匹配歌词");
 
   $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(
@@ -142,6 +297,30 @@ function registerControllerClass() {
           openCorrectionPanel();
         }
       },
+      "toggleIsland:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          toggleIslandVisibility();
+        }
+      },
+      "openAutomationSettings:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          openAutomationSettings();
+        }
+      },
+      "showAbout:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          showAboutDialog();
+        }
+      },
+      "quitApp:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          $.NSApplication.sharedApplication.terminate(null);
+        }
+      },
       "searchCandidates:": {
         types: ["void", ["id"]],
         implementation: function(_sender) {
@@ -152,6 +331,12 @@ function registerControllerClass() {
         types: ["void", ["id"]],
         implementation: function(_sender) {
           saveCorrection();
+        }
+      },
+      "saveDisplaySettings:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          saveDisplaySettingsOnly();
         }
       },
       "cancelCorrection:": {
@@ -218,6 +403,86 @@ function createIslandWindow() {
   state.titleLabel = titleLabel;
   state.lyricLabel = lyricLabel;
   state.statusButton = fixButton;
+  applyDisplaySettings();
+}
+
+function createStatusMenu() {
+  var statusItem = $.NSStatusBar.systemStatusBar.statusItemWithLength($.NSSquareStatusItemLength);
+  var button = statusItem.button;
+  if (button) {
+    var image = $.NSImage.imageWithSystemSymbolNameAccessibilityDescription(
+      $("music.note"),
+      $(PRODUCT_NAME)
+    );
+    if (image) {
+      image.setTemplate(true);
+      button.setImage(image);
+    } else {
+      button.setTitle($("♪"));
+    }
+    button.setToolTip($(PRODUCT_NAME));
+  }
+
+  var menu = $.NSMenu.alloc.initWithTitle($(PRODUCT_NAME));
+  menu.setAutoenablesItems(false);
+
+  var visibilityItem = addMenuItem(menu, "隐藏歌词", "toggleIsland:");
+  addMenuItem(menu, "人工修正歌词…", "openCorrection:");
+  menu.addItem($.NSMenuItem.separatorItem);
+  addMenuItem(menu, "打开自动化权限设置", "openAutomationSettings:");
+  addMenuItem(menu, "关于灵动音乐", "showAbout:");
+  menu.addItem($.NSMenuItem.separatorItem);
+  addMenuItem(menu, "退出灵动音乐", "quitApp:");
+
+  statusItem.setMenu(menu);
+  state.statusItem = statusItem;
+  state.visibilityMenuItem = visibilityItem;
+}
+
+function addMenuItem(menu, title, action) {
+  var item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent($(title), action, $(""));
+  item.setTarget(state.controller);
+  item.setEnabled(true);
+  menu.addItem(item);
+  return item;
+}
+
+function toggleIslandVisibility() {
+  if (!state.window) {
+    return;
+  }
+  if (state.window.isVisible) {
+    state.window.orderOut(null);
+  } else {
+    state.window.orderFrontRegardless;
+  }
+  updateVisibilityMenuItem();
+}
+
+function updateVisibilityMenuItem() {
+  if (!state.visibilityMenuItem || !state.window) {
+    return;
+  }
+  state.visibilityMenuItem.setTitle($(state.window.isVisible ? "隐藏歌词" : "显示歌词"));
+}
+
+function openAutomationSettings() {
+  var url = $.NSURL.URLWithString(
+    $("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+  );
+  $.NSWorkspace.sharedWorkspace.openURL(url);
+}
+
+function showAboutDialog() {
+  var alert = $.NSAlert.alloc.init;
+  alert.setMessageText($(PRODUCT_NAME));
+  alert.setInformativeText($(
+    "版本 " + PRODUCT_VERSION + "\n\n" +
+    "为 Apple Music 提供轻量悬浮同步歌词。\n" +
+    "用户数据保存在：\n" + DATA_ROOT
+  ));
+  alert.addButtonWithTitle($("好"));
+  alert.runModal;
 }
 
 function getVisibleScreenFrame() {
@@ -255,6 +520,19 @@ function makeLabel(frame, size, alpha, center) {
     label.setAlignment($.NSTextAlignmentCenter);
   }
   return label;
+}
+
+function applyDisplaySettings() {
+  if (!state.settings) {
+    state.settings = defaultSettings();
+  }
+  state.settings = normalizeSettings(state.settings);
+  if (state.lyricLabel) {
+    state.lyricLabel.setFont(
+      $.NSFont.systemFontOfSizeWeight(state.settings.lyricFontSize, $.NSFontWeightSemibold)
+    );
+    state.lyricLabel.setTextColor(nsColorFromHex(state.settings.lyricColorHex));
+  }
 }
 
 function renderStatus(title, lyric) {
@@ -300,6 +578,8 @@ function pollAndRender() {
     state.currentMeta = meta;
     state.currentLyrics = [];
     state.currentLyricsSource = "";
+    state.currentLrclibId = "";
+    state.currentOffsetSeconds = 0;
     state.lastDisplayLine = "";
     renderStatus(title, "正在匹配歌词");
     resolveLyricsForCurrentTrack(meta, key);
@@ -314,7 +594,7 @@ function pollAndRender() {
     return;
   }
 
-  var line = findLyricLine(state.currentLyrics, musicState.position);
+  var line = findLyricLine(state.currentLyrics, musicState.position, state.currentOffsetSeconds);
   if (musicState.playbackState === "paused") {
     renderStatus(title, "暂停 · " + line);
   } else {
@@ -327,6 +607,8 @@ function resetCurrentTrack() {
   state.currentKey = "";
   state.currentLyrics = [];
   state.currentLyricsSource = "";
+  state.currentLrclibId = "";
+  state.currentOffsetSeconds = 0;
   state.lastDisplayLine = "";
   state.lastLookupKey = "";
   state.lastError = "";
@@ -439,6 +721,8 @@ function resolveLyricsForCurrentTrack(meta, key) {
     if (loaded.ok) {
       state.currentLyrics = loaded.lines;
       state.currentLyricsSource = override.source || "override";
+      state.currentLrclibId = loaded.lrclibId || override.lrclibId || "";
+      state.currentOffsetSeconds = toNumber(override.offsetSeconds);
       return;
     }
     state.lastError = loaded.message;
@@ -451,6 +735,8 @@ function resolveLyricsForCurrentTrack(meta, key) {
       if (exactLines.length > 0) {
         state.currentLyrics = exactLines;
         state.currentLyricsSource = "lrclib:" + exact.id;
+        state.currentLrclibId = String(exact.id);
+        state.currentOffsetSeconds = 0;
         return;
       }
     }
@@ -472,9 +758,13 @@ function resolveLyricsForCurrentTrack(meta, key) {
 
     state.currentLyrics = lines;
     state.currentLyricsSource = "lrclib:" + best.id;
+    state.currentLrclibId = String(best.id);
+    state.currentOffsetSeconds = 0;
   } catch (error) {
     state.currentLyrics = [];
     state.currentLyricsSource = "";
+    state.currentLrclibId = "";
+    state.currentOffsetSeconds = 0;
     state.lastError = "歌词服务暂不可用";
   }
 }
@@ -497,7 +787,7 @@ function loadLyricsFromOverride(override) {
     if (override.source === "manual-lrc" && override.lrcText) {
       var manualLines = parseLrc(override.lrcText);
       if (manualLines.length > 0) {
-        return { ok: true, lines: manualLines };
+        return { ok: true, lines: manualLines, lrclibId: "" };
       }
       return { ok: false, message: "本地 LRC 无可用时间戳" };
     }
@@ -506,7 +796,7 @@ function loadLyricsFromOverride(override) {
       var item = fetchLrclibById(override.lrclibId);
       var lines = parseLrc(item.syncedLyrics || "");
       if (lines.length > 0) {
-        return { ok: true, lines: lines };
+        return { ok: true, lines: lines, lrclibId: String(override.lrclibId) };
       }
       return { ok: false, message: "未找到同步歌词" };
     }
@@ -786,13 +1076,13 @@ function parseFractionMillis(value) {
   return parseInt(text.substring(0, 3), 10);
 }
 
-function findLyricLine(lines, position) {
+function findLyricLine(lines, position, offsetSeconds) {
   if (!lines || lines.length === 0) {
     return "未找到同步歌词";
   }
 
   var current = lines[0].text;
-  var time = toNumber(position) + 0.15;
+  var time = Math.max(0, toNumber(position) + toNumber(offsetSeconds) + 0.15);
   for (var i = 0; i < lines.length; i++) {
     if (lines[i].time <= time) {
       current = lines[i].text;
@@ -812,7 +1102,7 @@ function openCorrectionPanel() {
   }
 
   var width = 520;
-  var height = 482;
+  var height = 620;
   var panel = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(
     $.NSMakeRect(0, 0, width, height),
     $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable,
@@ -831,27 +1121,35 @@ function openCorrectionPanel() {
   state.fields.album = addTextField(content, "专辑", 22, y - 88, 332, state.currentMeta ? state.currentMeta.album : "");
   state.fields.duration = addTextField(content, "时长", 386, y, 90, state.currentMeta ? String(Math.round(toNumber(state.currentMeta.duration))) : "");
   state.fields.lrclibId = addTextField(content, "LRCLIB ID", 386, y - 44, 90, "");
+  state.fields.offsetSeconds = addTextField(content, "偏移秒", 386, y - 88, 90, "0");
+  state.fields.lyricFontSize = addTextField(content, "歌词字号", 386, y - 132, 90, "");
+  state.fields.lyricColorHex = addTextField(content, "歌词颜色", 386, y - 176, 90, "");
 
   var searchButton = $.NSButton.buttonWithTitleTargetAction($("重新搜索"), state.controller, "searchCandidates:");
-  searchButton.setFrame($.NSMakeRect(386, y - 92, 90, 30));
+  searchButton.setFrame($.NSMakeRect(386, y - 220, 90, 30));
   searchButton.setBezelStyle($.NSBezelStyleRounded);
   content.addSubview(searchButton);
 
-  addStaticLabel(content, "候选", 22, y - 134, 56, 18);
-  var popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(86, y - 140, 390, 28), false);
+  addStaticLabel(content, "候选", 22, y - 262, 56, 18);
+  var popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(86, y - 268, 390, 28), false);
   popup.addItemWithTitle($("暂无候选"));
   content.addSubview(popup);
   state.candidatePopup = popup;
 
-  addStaticLabel(content, "LRC", 22, y - 184, 56, 18);
-  var scroll = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(86, 86, 390, 172));
+  addStaticLabel(content, "LRC", 22, y - 312, 56, 18);
+  var scroll = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(86, 86, 390, 222));
   scroll.setHasVerticalScroller(true);
   scroll.setBorderType($.NSBezelBorder);
-  var lrcView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 390, 172));
+  var lrcView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 390, 222));
   lrcView.setFont($.NSFont.userFixedPitchFontOfSize(12));
   scroll.setDocumentView(lrcView);
   content.addSubview(scroll);
   state.fields.lrcText = lrcView;
+
+  var styleButton = $.NSButton.buttonWithTitleTargetAction($("应用样式"), state.controller, "saveDisplaySettings:");
+  styleButton.setFrame($.NSMakeRect(202, 28, 90, 32));
+  styleButton.setBezelStyle($.NSBezelStyleRounded);
+  content.addSubview(styleButton);
 
   var saveButton = $.NSButton.buttonWithTitleTargetAction($("保存"), state.controller, "saveCorrection:");
   saveButton.setFrame($.NSMakeRect(302, 28, 82, 32));
@@ -900,6 +1198,28 @@ function populateCorrectionFields() {
   state.fields.artist.setStringValue($(state.currentMeta.artist || ""));
   state.fields.album.setStringValue($(state.currentMeta.album || ""));
   state.fields.duration.setStringValue($(String(Math.round(toNumber(state.currentMeta.duration)))));
+  if (state.fields.lrclibId) {
+    state.fields.lrclibId.setStringValue($(state.currentLrclibId || sourceLrclibId(state.currentLyricsSource) || ""));
+  }
+  if (state.fields.offsetSeconds) {
+    state.fields.offsetSeconds.setStringValue($(formatOffsetSeconds(state.currentOffsetSeconds)));
+  }
+  if (state.fields.lyricFontSize || state.fields.lyricColorHex) {
+    populateDisplaySettingsFields();
+  }
+}
+
+function populateDisplaySettingsFields() {
+  if (!state.settings) {
+    state.settings = loadSettings();
+  }
+  state.settings = normalizeSettings(state.settings);
+  if (state.fields.lyricFontSize) {
+    state.fields.lyricFontSize.setStringValue($(String(state.settings.lyricFontSize)));
+  }
+  if (state.fields.lyricColorHex) {
+    state.fields.lyricColorHex.setStringValue($(state.settings.lyricColorHex));
+  }
 }
 
 function closeCorrectionPanel() {
@@ -917,6 +1237,32 @@ function readManualMeta() {
     persistentId: state.currentMeta ? state.currentMeta.persistentId : "",
     databaseId: state.currentMeta ? state.currentMeta.databaseId : ""
   };
+}
+
+function readManualOffsetSeconds() {
+  return clampOffsetSeconds(toNumber(fieldString("offsetSeconds")));
+}
+
+function readDisplaySettingsFields() {
+  var current = normalizeSettings(state.settings || defaultSettings());
+  return normalizeSettings({
+    lyricFontSize: fieldString("lyricFontSize") || current.lyricFontSize,
+    lyricColorHex: fieldString("lyricColorHex") || current.lyricColorHex
+  });
+}
+
+function saveDisplaySettingsFromFields() {
+  state.settings = readDisplaySettingsFields();
+  saveSettings();
+  applyDisplaySettings();
+}
+
+function saveDisplaySettingsOnly() {
+  saveDisplaySettingsFromFields();
+  renderStatus(
+    state.currentMeta ? formatTrackTitle(state.currentMeta, "paused") : PRODUCT_NAME,
+    "显示样式已保存"
+  );
 }
 
 function fieldString(name) {
@@ -974,7 +1320,9 @@ function searchManualCandidates() {
 }
 
 function saveCorrection() {
+  saveDisplaySettingsFromFields();
   var meta = readManualMeta();
+  var offsetSeconds = readManualOffsetSeconds();
   var lrcText = textViewString(state.fields.lrcText);
   var lrclibId = fieldString("lrclibId");
   var selectedCandidate = getSelectedManualCandidate();
@@ -993,6 +1341,7 @@ function saveCorrection() {
       album: meta.album,
       duration: Math.round(toNumber(meta.duration)),
       source: "manual-lrc",
+      offsetSeconds: offsetSeconds,
       lrcText: lrcText,
       updatedAt: new Date().toISOString()
     };
@@ -1017,6 +1366,7 @@ function saveCorrection() {
         duration: Math.round(toNumber(meta.duration || item.duration)),
         source: "lrclib",
         lrclibId: parseInt(id, 10),
+        offsetSeconds: offsetSeconds,
         updatedAt: new Date().toISOString()
       };
     } catch (_error) {
@@ -1037,8 +1387,13 @@ function saveCorrection() {
   state.currentKey = makeTrackFingerprint(meta);
   state.currentLyrics = parsedLines;
   state.currentLyricsSource = entry.source;
+  state.currentLrclibId = entry.lrclibId ? String(entry.lrclibId) : "";
+  state.currentOffsetSeconds = offsetSeconds;
   state.lastError = "";
-  renderStatus(formatTrackTitle(meta, "paused"), findLyricLine(parsedLines, state.currentMeta ? state.currentMeta.position : 0));
+  renderStatus(
+    formatTrackTitle(meta, "paused"),
+    findLyricLine(parsedLines, state.currentMeta ? state.currentMeta.position : 0, state.currentOffsetSeconds)
+  );
   closeCorrectionPanel();
 }
 
@@ -1100,6 +1455,33 @@ function validMusicId(value) {
     return "";
   }
   return text;
+}
+
+function sourceLrclibId(source) {
+  var text = String(source || "");
+  if (text.indexOf("lrclib:") !== 0) {
+    return "";
+  }
+  return text.substring("lrclib:".length);
+}
+
+function clampOffsetSeconds(value) {
+  var number = toNumber(value);
+  if (number > 120) {
+    return 120;
+  }
+  if (number < -120) {
+    return -120;
+  }
+  return Math.round(number * 10) / 10;
+}
+
+function formatOffsetSeconds(value) {
+  var number = clampOffsetSeconds(value);
+  if (Math.abs(number) < 0.05) {
+    return "0";
+  }
+  return String(number);
 }
 
 function formatTrackTitle(meta, playbackState) {
@@ -1213,10 +1595,14 @@ function compact(value, maxLength) {
 
 function runSelfTest() {
   ensureDataFiles();
+  assert(hasArgument(["--self-test"], "--self-test"), "Command arguments should be detected");
+  assert(!hasArgument({}, "--self-test"), "Non-array app launch arguments should be ignored");
   var sample = "[00:00.00]Intro\n[00:01.50]第一句\n[00:03.00][00:04.00]重复句";
   var lines = parseLrc(sample);
   assert(lines.length === 4, "LRC parser should support multiple timestamps");
   assert(findLyricLine(lines, 1.55) === "第一句", "Current lyric should match playback position");
+  assert(findLyricLine(lines, 0.55, 1) === "第一句", "Positive offset should advance lyrics");
+  assert(findLyricLine(lines, 2.55, -1) === "第一句", "Negative offset should delay lyrics");
   assert(findLyricLine(lines, 4.2) === "重复句", "Current lyric should match repeated timestamp");
   assert(normalizeForKey("Artist Name") === "artist-name", "Normalize key should be stable");
   assert(validMusicId("missing value") === "", "Missing Music IDs should not become track keys");
@@ -1245,7 +1631,15 @@ function runSelfTest() {
   });
   assert(hasVariant(broadVariants, "平行", "张鑫", "", 0), "Search should fall back without album and duration");
   assert(hasVariant(broadVariants, "平行", "", "", 0), "Search should fall back to title-only lookup");
+  assert(sourceLrclibId("lrclib:12345") === "12345", "LRCLIB source IDs should be reusable");
+  assert(clampOffsetSeconds(130) === 120, "Offset should be clamped");
+  assert(clampLyricFontSize(8) === 14, "Lyric font size should have a lower bound");
+  assert(clampLyricFontSize(40) === 30, "Lyric font size should have an upper bound");
+  assert(normalizeHexColor("0f0") === "#00FF00", "Short hex colors should be normalized");
+  assert(normalizeHexColor("bad-color") === "#FFFFFF", "Invalid colors should fall back to white");
+  assert(OVERRIDES_PATH.indexOf(".app/Contents/") < 0, "User data must not be stored inside the app bundle");
   JSON.parse(readTextFile(OVERRIDES_PATH));
+  JSON.parse(readTextFile(SETTINGS_PATH));
   console.log("self-test passed");
 }
 
@@ -1280,13 +1674,21 @@ function runUiSmokeTest() {
   registerControllerClass();
   state.controller = $.LyricIslandController.alloc.init;
   createIslandWindow();
+  createStatusMenu();
   renderStatus("测试歌曲 - 测试歌手", "这是一句用于检查窗口渲染的歌词");
   openCorrectionPanel();
+  assert(!!state.statusItem, "Menu bar item should be created");
+  assert(!!state.visibilityMenuItem, "Visibility menu item should be created");
+  toggleIslandVisibility();
+  toggleIslandVisibility();
   if (state.correctionPanel) {
     state.correctionPanel.close;
   }
   if (state.window) {
     state.window.close;
+  }
+  if (state.statusItem) {
+    $.NSStatusBar.systemStatusBar.removeStatusItem(state.statusItem);
   }
   console.log("ui-smoke passed");
 }

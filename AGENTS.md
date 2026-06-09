@@ -9,8 +9,8 @@
 - 项目名称：灵动音乐
 - 项目用途：做一个个人使用的 macOS Apple Music 桌面歌词/灵动岛歌词原型。
 - 主要用户：项目 owner 自己，优先满足日常听歌时的悬浮歌词体验。
-- 当前阶段：脚本原型设计阶段，尚未初始化完整代码结构。
-- 核心目标：终端启动后，在屏幕顶部显示一个可拖动、置顶的灵动岛歌词胶囊，读取 Apple Music 当前歌曲信息和播放进度，从 LRCLIB 匹配同步歌词并显示当前句。
+- 当前阶段：v0.2 可安装内测版。
+- 核心目标：安装并启动后，在屏幕顶部显示一个可拖动、置顶的灵动岛歌词胶囊，读取 Apple Music 当前歌曲信息和播放进度，从 LRCLIB 匹配同步歌词并显示当前句。
 
 ## 技术栈
 
@@ -20,7 +20,7 @@
 - 系统 UI：AppKit，通过 JXA 的 Objective-C bridge 创建窗口和控件。
 - 播放信息读取：AppleScript/JXA 控制 Music.app，读取歌曲名、歌手、专辑、时长、播放进度、播放状态。
 - 歌词来源：LRCLIB 在线 API，同步歌词优先。
-- 本地数据：JSON 文件，例如 `data/overrides.json` 保存人工匹配映射。
+- 本地数据：JSON 文件保存在 `~/Library/Application Support/灵动音乐/`；项目 `data/` 仅用于开发迁移和格式检查。
 - 包管理器：暂无。第一版应尽量依赖 macOS 自带能力，不先引入 npm/pnpm/yarn。
 - 测试工具：暂无自动化测试框架。先以脚本试运行、Apple Music 实机流程、JSON 校验为主。
 - 已知背景：会话里提到 Node 可用，但 Swift 当前工具链/SDK 不匹配，所以第一版避开 Swift/Xcode。
@@ -38,6 +38,9 @@ osascript -e 'tell application "Music" to if it is running then get name of curr
 
 # 检查人工映射 JSON 是否有效（文件创建后使用）
 plutil -lint data/overrides.json
+
+# 构建通用架构 App、DMG 和 SHA-256 校验值
+scripts/build-release.sh
 ```
 
 如果后续改成 Node、Swift、Electron、Tauri 或原生 App，请把上面的命令替换成真实命令。
@@ -70,7 +73,7 @@ scripts/
 - 匹配失败：仍显示歌曲信息和“未找到同步歌词”，并保留人工补充入口。
 - 人工补充：允许修改歌名、歌手、专辑、时长，重新搜索候选歌词。
 - 手动指定：允许保存 LRCLIB ID 或粘贴 LRC 文本。
-- 本地保存：把人工映射保存到 `data/overrides.json`，优先用 Apple Music track id；取不到时用规范化后的 `artist + title + duration`。
+- 本地保存：把人工映射保存到 `~/Library/Application Support/灵动音乐/overrides.json`，优先用 Apple Music track id；取不到时用规范化后的 `artist + title + duration`。
 - 播放状态：暂停时停在当前句，继续后恢复更新；换歌后重新匹配。
 
 ## 暂不做的事
