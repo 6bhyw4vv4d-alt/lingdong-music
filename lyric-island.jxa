@@ -24,6 +24,7 @@ var state = {
   visibilityMenuItem: null,
   titleLabel: null,
   lyricLabel: null,
+  translationLabel: null,
   statusButton: null,
   controller: null,
   correctionPanel: null,
@@ -323,6 +324,24 @@ function registerControllerClass() {
           openCorrectionPanel();
         }
       },
+      "advanceLyrics:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          adjustCurrentOffset(0.5);
+        }
+      },
+      "resetLyricsOffset:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          setCurrentOffset(0);
+        }
+      },
+      "delayLyrics:": {
+        types: ["void", ["id"]],
+        implementation: function(_sender) {
+          adjustCurrentOffset(-0.5);
+        }
+      },
       "toggleIsland:": {
         types: ["void", ["id"]],
         implementation: function(_sender) {
@@ -377,7 +396,7 @@ function registerControllerClass() {
 
 function createIslandWindow() {
   var width = 620;
-  var height = 86;
+  var height = 104;
   var screenFrame = getVisibleScreenFrame();
   var x = screenFrame.origin.x + (screenFrame.size.width - width) / 2;
   var y = screenFrame.origin.y + screenFrame.size.height - height - 16;
@@ -401,24 +420,26 @@ function createIslandWindow() {
   content.layer.setBackgroundColor(
     $.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.04, 0.045, 0.05, 0.88).CGColor
   );
-  content.layer.setCornerRadius(34);
+  content.layer.setCornerRadius(38);
   content.layer.setMasksToBounds(false);
 
-  var titleLabel = makeLabel($.NSMakeRect(72, 50, 448, 22), 13, 0.82, true);
-  var lyricLabel = makeLabel($.NSMakeRect(72, 18, 448, 30), 20, 1.0, true);
+  var titleLabel = makeLabel($.NSMakeRect(72, 62, 448, 22), 13, 0.82, true);
+  var lyricLabel = makeLabel($.NSMakeRect(72, 25, 448, 34), 20, 1.0, true);
+  var translationLabel = makeLabel($.NSMakeRect(72, 16, 448, 20), 14, 0.74, true);
+  translationLabel.setHidden(true);
   var fixButton = $.NSButton.buttonWithTitleTargetAction($("修正"), state.controller, "openCorrection:");
-  fixButton.setFrame($.NSMakeRect(524, 28, 54, 28));
+  fixButton.setFrame($.NSMakeRect(524, 38, 54, 28));
   fixButton.setBezelStyle($.NSBezelStyleRounded);
   fixButton.setFont($.NSFont.systemFontOfSize(12));
 
   var quitButton = $.NSButton.buttonWithTitleTargetAction($("×"), state.controller, "quitApp:");
-  quitButton.setFrame($.NSMakeRect(584, 30, 26, 26));
+  quitButton.setFrame($.NSMakeRect(584, 39, 26, 26));
   quitButton.setBordered(false);
   quitButton.setFont($.NSFont.systemFontOfSizeWeight(17, $.NSFontWeightMedium));
   quitButton.setContentTintColor($.NSColor.colorWithCalibratedWhiteAlpha(1, 0.72));
   quitButton.setToolTip($("退出灵动音乐"));
 
-  var dot = $.NSView.alloc.initWithFrame($.NSMakeRect(26, 34, 18, 18));
+  var dot = $.NSView.alloc.initWithFrame($.NSMakeRect(26, 43, 18, 18));
   dot.setWantsLayer(true);
   dot.layer.setCornerRadius(9);
   dot.layer.setBackgroundColor(
@@ -428,6 +449,7 @@ function createIslandWindow() {
   content.addSubview(dot);
   content.addSubview(titleLabel);
   content.addSubview(lyricLabel);
+  content.addSubview(translationLabel);
   content.addSubview(fixButton);
   content.addSubview(quitButton);
   window.setContentView(content);
@@ -436,8 +458,10 @@ function createIslandWindow() {
   state.window = window;
   state.titleLabel = titleLabel;
   state.lyricLabel = lyricLabel;
+  state.translationLabel = translationLabel;
   state.statusButton = fixButton;
   applyDisplaySettings();
+  updateLyricLayout(false);
 }
 
 function createStatusMenu() {
@@ -463,6 +487,10 @@ function createStatusMenu() {
   var visibilityItem = addMenuItem(menu, "隐藏歌词", "toggleIsland:");
   addMenuItem(menu, "人工修正歌词…", "openCorrection:");
   menu.addItem($.NSMenuItem.separatorItem);
+  addMenuItem(menu, "歌词提前 0.5 秒", "advanceLyrics:", "[", $.NSEventModifierFlagOption);
+  addMenuItem(menu, "歌词恢复同步", "resetLyricsOffset:", "0", $.NSEventModifierFlagOption);
+  addMenuItem(menu, "歌词延后 0.5 秒", "delayLyrics:", "]", $.NSEventModifierFlagOption);
+  menu.addItem($.NSMenuItem.separatorItem);
   addMenuItem(menu, "打开自动化权限设置", "openAutomationSettings:");
   addMenuItem(menu, "关于灵动音乐", "showAbout:");
   menu.addItem($.NSMenuItem.separatorItem);
@@ -473,10 +501,17 @@ function createStatusMenu() {
   state.visibilityMenuItem = visibilityItem;
 }
 
-function addMenuItem(menu, title, action) {
-  var item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent($(title), action, $(""));
+function addMenuItem(menu, title, action, keyEquivalent, modifierMask) {
+  var item = $.NSMenuItem.alloc.initWithTitleActionKeyEquivalent(
+    $(title),
+    action,
+    $(keyEquivalent || "")
+  );
   item.setTarget(state.controller);
   item.setEnabled(true);
+  if (keyEquivalent && modifierMask !== undefined) {
+    item.setKeyEquivalentModifierMask(modifierMask);
+  }
   menu.addItem(item);
   return item;
 }
@@ -567,14 +602,44 @@ function applyDisplaySettings() {
     );
     state.lyricLabel.setTextColor(nsColorFromHex(state.settings.lyricColorHex));
   }
+  if (state.translationLabel) {
+    state.translationLabel.setFont(
+      $.NSFont.systemFontOfSizeWeight(
+        Math.max(12, state.settings.lyricFontSize - 6),
+        $.NSFontWeightMedium
+      )
+    );
+    state.translationLabel.setTextColor($.NSColor.colorWithCalibratedWhiteAlpha(1, 0.74));
+  }
 }
 
-function renderStatus(title, lyric) {
+function updateLyricLayout(hasTranslation) {
+  if (!state.titleLabel || !state.lyricLabel || !state.translationLabel) {
+    return;
+  }
+  if (hasTranslation) {
+    state.titleLabel.setFrame($.NSMakeRect(72, 70, 448, 20));
+    state.lyricLabel.setFrame($.NSMakeRect(72, 39, 448, 28));
+    state.translationLabel.setFrame($.NSMakeRect(72, 17, 448, 20));
+  } else {
+    state.titleLabel.setFrame($.NSMakeRect(72, 62, 448, 22));
+    state.lyricLabel.setFrame($.NSMakeRect(72, 25, 448, 34));
+    state.translationLabel.setFrame($.NSMakeRect(72, 14, 448, 20));
+  }
+}
+
+function renderStatus(title, lyric, translation) {
   if (!state.titleLabel || !state.lyricLabel) {
     return;
   }
+  var translatedLine = String(translation || "").trim();
   state.titleLabel.setStringValue($(title || PRODUCT_NAME));
   state.lyricLabel.setStringValue($(lyric || ""));
+  if (state.translationLabel) {
+    state.translationLabel.setStringValue($(translatedLine));
+    state.translationLabel.setHidden(!translatedLine);
+    updateLyricLayout(!!translatedLine);
+  }
 }
 
 function pollAndRender() {
@@ -628,12 +693,8 @@ function pollAndRender() {
     return;
   }
 
-  var line = findLyricLine(state.currentLyrics, musicState.position, state.currentOffsetSeconds);
-  if (musicState.playbackState === "paused") {
-    renderStatus(title, "暂停 · " + line);
-  } else {
-    renderStatus(title, line);
-  }
+  var entry = findLyricEntry(state.currentLyrics, musicState.position, state.currentOffsetSeconds);
+  renderLyricEntry(title, entry, musicState.playbackState === "paused");
 }
 
 function resetCurrentTrack() {
@@ -1062,7 +1123,7 @@ function shellQuote(value) {
 }
 
 function parseLrc(text) {
-  var lines = [];
+  var rawLines = [];
   var sourceLines = String(text || "").replace(/\r/g, "").split("\n");
 
   for (var i = 0; i < sourceLines.length; i++) {
@@ -1085,18 +1146,83 @@ function parseLrc(text) {
 
     var lyric = raw.replace(regex, "").trim();
     for (var j = 0; j < matches.length; j++) {
-      lines.push({
+      rawLines.push({
         time: matches[j],
         text: lyric || "♪"
       });
     }
   }
 
-  lines.sort(function(a, b) {
+  rawLines.sort(function(a, b) {
     return a.time - b.time;
   });
 
-  return lines;
+  return mergeBilingualLyricLines(rawLines);
+}
+
+function mergeBilingualLyricLines(lines) {
+  if (!lines || lines.length === 0) {
+    return [];
+  }
+
+  var merged = [];
+  var group = [];
+  var groupKey = null;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var key = lyricTimeKey(line.time);
+    if (group.length > 0 && key !== groupKey) {
+      merged.push(mergeLyricGroup(group));
+      group = [];
+    }
+    group.push(line);
+    groupKey = key;
+  }
+  if (group.length > 0) {
+    merged.push(mergeLyricGroup(group));
+  }
+  return merged;
+}
+
+function lyricTimeKey(time) {
+  return String(Math.round(toNumber(time) * 100));
+}
+
+function mergeLyricGroup(group) {
+  var chineseLines = [];
+  var nonChineseLines = [];
+  for (var i = 0; i < group.length; i++) {
+    var text = String(group[i].text || "").trim() || "♪";
+    if (isLikelyChineseLine(text)) {
+      chineseLines.push(text);
+    } else {
+      nonChineseLines.push(text);
+    }
+  }
+
+  var text = group[0].text || "♪";
+  var translation = "";
+  if (nonChineseLines.length > 0 && chineseLines.length > 0) {
+    text = nonChineseLines[0];
+    translation = firstDistinctLine(chineseLines, text);
+  }
+
+  return {
+    time: group[0].time,
+    text: text || "♪",
+    translation: translation
+  };
+}
+
+function firstDistinctLine(lines, original) {
+  var originalCompare = normalizeForCompare(original);
+  for (var i = 0; i < lines.length; i++) {
+    var line = String(lines[i] || "").trim();
+    if (line && normalizeForCompare(line) !== originalCompare) {
+      return line;
+    }
+  }
+  return "";
 }
 
 function parseFractionMillis(value) {
@@ -1111,20 +1237,76 @@ function parseFractionMillis(value) {
 }
 
 function findLyricLine(lines, position, offsetSeconds) {
+  return findLyricEntry(lines, position, offsetSeconds).text;
+}
+
+function findLyricEntry(lines, position, offsetSeconds) {
   if (!lines || lines.length === 0) {
-    return "未找到同步歌词";
+    return { time: 0, text: "未找到同步歌词", translation: "" };
   }
 
-  var current = lines[0].text;
+  var current = normalizeLyricEntry(lines[0]);
   var time = Math.max(0, toNumber(position) + toNumber(offsetSeconds) + 0.15);
   for (var i = 0; i < lines.length; i++) {
     if (lines[i].time <= time) {
-      current = lines[i].text;
+      current = normalizeLyricEntry(lines[i]);
     } else {
       break;
     }
   }
-  return current || "♪";
+  return current;
+}
+
+function normalizeLyricEntry(entry) {
+  if (!entry) {
+    return { time: 0, text: "♪", translation: "" };
+  }
+  return {
+    time: toNumber(entry.time),
+    text: String(entry.text || "♪"),
+    translation: String(entry.translation || "")
+  };
+}
+
+function renderLyricEntry(title, entry, paused) {
+  var normalized = normalizeLyricEntry(entry);
+  var translation = shouldShowChineseTranslation(normalized.text, normalized.translation) ?
+    normalized.translation :
+    "";
+  renderStatus(title, (paused ? "暂停 · " : "") + normalized.text, translation);
+}
+
+function shouldShowChineseTranslation(original, translation) {
+  var translatedLine = String(translation || "").trim();
+  if (!translatedLine) {
+    return false;
+  }
+  if (!isLikelyChineseLine(translatedLine)) {
+    return false;
+  }
+  if (isLikelyChineseLine(original)) {
+    return false;
+  }
+  return normalizeForCompare(original) !== normalizeForCompare(translatedLine);
+}
+
+function isLikelyChineseLine(value) {
+  var text = String(value || "");
+  return containsChineseCharacters(text) &&
+    !containsJapaneseKana(text) &&
+    !containsHangul(text);
+}
+
+function containsChineseCharacters(value) {
+  return /[\u3400-\u9fff\uf900-\ufaff]/.test(String(value || ""));
+}
+
+function containsJapaneseKana(value) {
+  return /[\u3040-\u30ff]/.test(String(value || ""));
+}
+
+function containsHangul(value) {
+  return /[\uac00-\ud7af]/.test(String(value || ""));
 }
 
 function openCorrectionPanel() {
@@ -1155,7 +1337,11 @@ function openCorrectionPanel() {
   state.fields.album = addTextField(content, "专辑", 22, y - 88, 332, state.currentMeta ? state.currentMeta.album : "");
   state.fields.duration = addTextField(content, "时长", 386, y, 90, state.currentMeta ? String(Math.round(toNumber(state.currentMeta.duration))) : "");
   state.fields.lrclibId = addTextField(content, "LRCLIB ID", 386, y - 44, 90, "");
-  state.fields.offsetSeconds = addTextField(content, "偏移秒", 386, y - 88, 90, "0");
+  addStaticLabel(content, "歌词快慢", 322, y - 82, 56, 18);
+  addOffsetButton(content, "早", 386, y - 88, "advanceLyrics:", "[", "歌词提前 0.5 秒（⌥[）");
+  addOffsetButton(content, "准", 418, y - 88, "resetLyricsOffset:", "0", "恢复同步（⌥0）");
+  addOffsetButton(content, "晚", 450, y - 88, "delayLyrics:", "]", "歌词延后 0.5 秒（⌥]）");
+  state.fields.offsetStatus = makeOffsetStatusLabel(content, 386, y - 112, 90, 18);
   state.fields.lyricFontSize = addTextField(content, "歌词字号", 386, y - 132, 90, "");
   state.fields.lyricColorHex = addTextField(content, "歌词颜色", 386, y - 176, 90, "");
 
@@ -1224,6 +1410,31 @@ function addTextField(content, labelText, x, y, inputWidth, value) {
   return field;
 }
 
+function addOffsetButton(content, title, x, y, action, keyEquivalent, tooltip) {
+  var button = $.NSButton.buttonWithTitleTargetAction($(title), state.controller, action);
+  button.setFrame($.NSMakeRect(x, y, 28, 28));
+  button.setBezelStyle($.NSBezelStyleRounded);
+  button.setFont($.NSFont.systemFontOfSize(12));
+  button.setKeyEquivalent($(keyEquivalent));
+  button.setKeyEquivalentModifierMask($.NSEventModifierFlagOption);
+  button.setToolTip($(tooltip));
+  content.addSubview(button);
+  return button;
+}
+
+function makeOffsetStatusLabel(content, x, y, width, height) {
+  var label = $.NSTextField.alloc.initWithFrame($.NSMakeRect(x, y, width, height));
+  label.setEditable(false);
+  label.setSelectable(false);
+  label.setBordered(false);
+  label.setDrawsBackground(false);
+  label.setTextColor($.NSColor.secondaryLabelColor);
+  label.setFont($.NSFont.systemFontOfSize(11));
+  label.setAlignment($.NSTextAlignmentCenter);
+  content.addSubview(label);
+  return label;
+}
+
 function populateCorrectionFields() {
   if (!state.currentMeta || !state.fields.title) {
     return;
@@ -1235,9 +1446,7 @@ function populateCorrectionFields() {
   if (state.fields.lrclibId) {
     state.fields.lrclibId.setStringValue($(state.currentLrclibId || sourceLrclibId(state.currentLyricsSource) || ""));
   }
-  if (state.fields.offsetSeconds) {
-    state.fields.offsetSeconds.setStringValue($(formatOffsetSeconds(state.currentOffsetSeconds)));
-  }
+  updateOffsetStatusLabel();
   if (state.fields.lyricFontSize || state.fields.lyricColorHex) {
     populateDisplaySettingsFields();
   }
@@ -1271,10 +1480,6 @@ function readManualMeta() {
     persistentId: state.currentMeta ? state.currentMeta.persistentId : "",
     databaseId: state.currentMeta ? state.currentMeta.databaseId : ""
   };
-}
-
-function readManualOffsetSeconds() {
-  return clampOffsetSeconds(toNumber(fieldString("offsetSeconds")));
 }
 
 function readDisplaySettingsFields() {
@@ -1356,7 +1561,7 @@ function searchManualCandidates() {
 function saveCorrection() {
   saveDisplaySettingsFromFields();
   var meta = readManualMeta();
-  var offsetSeconds = readManualOffsetSeconds();
+  var offsetSeconds = clampOffsetSeconds(state.currentOffsetSeconds);
   var lrcText = textViewString(state.fields.lrcText);
   var lrclibId = fieldString("lrclibId");
   var selectedCandidate = getSelectedManualCandidate();
@@ -1424,9 +1629,10 @@ function saveCorrection() {
   state.currentLrclibId = entry.lrclibId ? String(entry.lrclibId) : "";
   state.currentOffsetSeconds = offsetSeconds;
   state.lastError = "";
-  renderStatus(
+  renderLyricEntry(
     formatTrackTitle(meta, "paused"),
-    findLyricLine(parsedLines, state.currentMeta ? state.currentMeta.position : 0, state.currentOffsetSeconds)
+    findLyricEntry(parsedLines, state.currentMeta ? state.currentMeta.position : 0, state.currentOffsetSeconds),
+    false
   );
   closeCorrectionPanel();
 }
@@ -1510,12 +1716,84 @@ function clampOffsetSeconds(value) {
   return Math.round(number * 10) / 10;
 }
 
+function adjustCurrentOffset(deltaSeconds) {
+  setCurrentOffset(state.currentOffsetSeconds + deltaSeconds);
+}
+
+function setCurrentOffset(value) {
+  state.currentOffsetSeconds = clampOffsetSeconds(value);
+  updateOffsetStatusLabel();
+
+  var saved = persistCurrentOffset();
+  if (!state.currentMeta) {
+    renderStatus(PRODUCT_NAME, "暂无播放内容，无法调整歌词快慢");
+    return;
+  }
+
+  var message = formatOffsetDescription(state.currentOffsetSeconds);
+  renderStatus(
+    formatTrackTitle(state.currentMeta, "paused"),
+    saved ? message + " · 已自动保存" : message
+  );
+}
+
+function persistCurrentOffset() {
+  if (!state.currentMeta) {
+    return false;
+  }
+  if (!state.overrides) {
+    state.overrides = loadOverrides();
+  }
+
+  var entry = findOverride(state.currentMeta);
+  if (!entry) {
+    var lrclibId = state.currentLrclibId || sourceLrclibId(state.currentLyricsSource);
+    if (!lrclibId) {
+      return false;
+    }
+    entry = {
+      title: state.currentMeta.title || "",
+      artist: state.currentMeta.artist || "",
+      album: state.currentMeta.album || "",
+      duration: Math.round(toNumber(state.currentMeta.duration)),
+      source: "lrclib",
+      lrclibId: parseInt(lrclibId, 10),
+      offsetSeconds: state.currentOffsetSeconds,
+      updatedAt: new Date().toISOString()
+    };
+    state.overrides.tracks[makeTrackKey(state.currentMeta)] = entry;
+  } else {
+    entry.offsetSeconds = state.currentOffsetSeconds;
+    entry.updatedAt = new Date().toISOString();
+  }
+
+  saveOverrides();
+  return true;
+}
+
+function updateOffsetStatusLabel() {
+  if (state.fields.offsetStatus) {
+    state.fields.offsetStatus.setStringValue($(formatOffsetDescription(state.currentOffsetSeconds)));
+  }
+}
+
 function formatOffsetSeconds(value) {
   var number = clampOffsetSeconds(value);
   if (Math.abs(number) < 0.05) {
     return "0";
   }
   return String(number);
+}
+
+function formatOffsetDescription(value) {
+  var number = clampOffsetSeconds(value);
+  if (Math.abs(number) < 0.05) {
+    return "当前同步";
+  }
+  if (number > 0) {
+    return "已提前 " + formatOffsetSeconds(number) + " 秒";
+  }
+  return "已延后 " + formatOffsetSeconds(Math.abs(number)) + " 秒";
 }
 
 function formatTrackTitle(meta, playbackState) {
@@ -1638,6 +1916,14 @@ function runSelfTest() {
   assert(findLyricLine(lines, 0.55, 1) === "第一句", "Positive offset should advance lyrics");
   assert(findLyricLine(lines, 2.55, -1) === "第一句", "Negative offset should delay lyrics");
   assert(findLyricLine(lines, 4.2) === "重复句", "Current lyric should match repeated timestamp");
+  var bilingualLines = parseLrc("[00:01.00]I love you\n[00:01.00]我爱你\n[00:03.00]世界");
+  assert(bilingualLines.length === 2, "Bilingual lines at the same timestamp should merge");
+  assert(findLyricEntry(bilingualLines, 1.0).text === "I love you", "Original non-Chinese lyric should stay on top");
+  assert(findLyricEntry(bilingualLines, 1.0).translation === "我爱你", "Chinese lyric should become translation");
+  assert(shouldShowChineseTranslation("I love you", "我爱你"), "Non-Chinese lyrics should show Chinese translation");
+  assert(shouldShowChineseTranslation("君を愛してる", "我爱你"), "Japanese lyrics should show Chinese translation");
+  assert(shouldShowChineseTranslation("사랑해", "我爱你"), "Korean lyrics should show Chinese translation");
+  assert(!shouldShowChineseTranslation("世界", "世界"), "Chinese lyrics should not duplicate translation");
   assert(normalizeForKey("Artist Name") === "artist-name", "Normalize key should be stable");
   assert(validMusicId("missing value") === "", "Missing Music IDs should not become track keys");
   assert(makeTrackFingerprint({
@@ -1667,6 +1953,9 @@ function runSelfTest() {
   assert(hasVariant(broadVariants, "平行", "", "", 0), "Search should fall back to title-only lookup");
   assert(sourceLrclibId("lrclib:12345") === "12345", "LRCLIB source IDs should be reusable");
   assert(clampOffsetSeconds(130) === 120, "Offset should be clamped");
+  assert(formatOffsetDescription(0) === "当前同步", "Zero offset should be described as synced");
+  assert(formatOffsetDescription(0.5) === "已提前 0.5 秒", "Positive offset should be described as early");
+  assert(formatOffsetDescription(-0.5) === "已延后 0.5 秒", "Negative offset should be described as delayed");
   assert(clampLyricFontSize(8) === 14, "Lyric font size should have a lower bound");
   assert(clampLyricFontSize(40) === 30, "Lyric font size should have an upper bound");
   assert(normalizeHexColor("0f0") === "#00FF00", "Short hex colors should be normalized");
@@ -1702,6 +1991,8 @@ function runUiSmokeTest() {
     persistentId: "ui-smoke",
     databaseId: ""
   };
+  state.currentLrclibId = "12345";
+  state.currentLyricsSource = "lrclib:12345";
 
   var nsApp = $.NSApplication.sharedApplication;
   nsApp.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
@@ -1710,9 +2001,19 @@ function runUiSmokeTest() {
   createIslandWindow();
   createStatusMenu();
   renderStatus("测试歌曲 - 测试歌手", "这是一句用于检查窗口渲染的歌词");
+  renderLyricEntry("测试歌曲 - 测试歌手", { time: 0, text: "I love you", translation: "我爱你" }, false);
+  assert(!state.translationLabel.isHidden, "Translation label should be visible for bilingual lyrics");
+  renderLyricEntry("测试歌曲 - 测试歌手", { time: 0, text: "中文歌词", translation: "中文歌词" }, false);
+  assert(state.translationLabel.isHidden, "Translation label should stay hidden for Chinese lyrics");
   openCorrectionPanel();
   assert(!!state.statusItem, "Menu bar item should be created");
   assert(!!state.visibilityMenuItem, "Visibility menu item should be created");
+  adjustCurrentOffset(0.5);
+  assert(state.currentOffsetSeconds === 0.5, "Quick adjustment should advance lyrics");
+  assert(fieldString("offsetStatus") === "已提前 0.5 秒", "Offset status should update without numeric input");
+  assert(findOverride(state.currentMeta).offsetSeconds === 0.5, "Quick adjustment should persist automatically");
+  setCurrentOffset(0);
+  assert(state.currentOffsetSeconds === 0, "Quick adjustment should reset lyrics offset");
   toggleIslandVisibility();
   toggleIslandVisibility();
   if (state.correctionPanel) {

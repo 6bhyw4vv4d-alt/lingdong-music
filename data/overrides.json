@@ -1,4 +1,25 @@
 {
   "version": 1,
-  "tracks": {}
+  "tracks": {
+    "music-track-id:0E57FCCB96194F60": {
+      "title": "心跳",
+      "artist": "王力宏",
+      "album": "心跳",
+      "duration": 263,
+      "source": "lrclib",
+      "lrclibId": 17425,
+      "offsetSeconds": -2,
+      "updatedAt": "2026-06-01T08:10:43.942Z"
+    },
+    "music-track-id:0E57FCCB96194F94": {
+      "title": "好心分手 (feat. 王力宏)",
+      "artist": "卢巧音",
+      "album": "不能不爱...卢巧音精选",
+      "duration": 180,
+      "source": "lrclib",
+      "lrclibId": 9592254,
+      "offsetSeconds": 5,
+      "updatedAt": "2026-06-09T05:50:14.823Z"
+    }
+  }
 }
